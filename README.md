@@ -1,0 +1,1 @@
+This is a chess engine i build for the purpose of learning more about rust
