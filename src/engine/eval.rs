@@ -1,6 +1,6 @@
-use shakmaty::{Chess, Position, Color, Role};
+use shakmaty::{Chess, Position, Role};
 
-fn piece_value(role: Role) -> i32 {
+pub const fn piece_value(role: Role) -> i32 {
     match role {
         Role::Pawn => 100,
         Role::Knight => 320,

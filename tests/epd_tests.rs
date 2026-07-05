@@ -49,10 +49,9 @@ fn parse_epd(text: &str) -> EpdCase {
 }
 
 /// Run the engine and check its best move equals the EPD's bm.
-fn check_case(case: &EpdCase, depth: u32, renderer: &impl render::Renderer) {
-    let result = engine::best_line(&case.pos, depth);
+fn check_case(case: &EpdCase, renderer: &impl render::Renderer) {
+    let result = engine::time_bound_best_line(&case.pos, 10000).unwrap(); // 1 second time limit
     let best = result.line.first().expect("engine returned no move");
-    println!("line of {:?} moves:", result.line);
     render::render_line(&case.pos, &result.line[0..], renderer);
 
     // Convert engine's move to SAN to compare against the EPD (which uses SAN).
@@ -78,7 +77,7 @@ fn run_all_epd_positions() {
         }
         let text = fs::read_to_string(&path).expect("readable epd file");
         let case = parse_epd(&text);
-        check_case(&case, 4, &renderer);   // depth 4; adjust per-file later if needed
+        check_case(&case, &renderer);   // depth 4; adjust per-file later if needed
         ran += 1;
     }
 
@@ -86,6 +85,7 @@ fn run_all_epd_positions() {
 }
 
 #[test]
+#[ignore = "manual scenario runner; set SCENARIO=<file> and run explicitly"]
 fn run_scenario() {
     let file = std::env::var("SCENARIO")
         .expect("set SCENARIO=<filename> to run this test");
@@ -94,5 +94,5 @@ fn run_scenario() {
         .join(&file);
     let text = fs::read_to_string(&path).expect("readable epd");
     let case = parse_epd(&text);
-    check_case(&case, 4, &render::TerminalRenderer);
+    check_case(&case, &render::TerminalRenderer);
 }

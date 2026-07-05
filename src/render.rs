@@ -11,11 +11,11 @@ pub trait Renderer {
 
 pub fn render_line(pos: &Chess, moves: &[Move], renderer: &impl Renderer) {
     let mut current_pos = pos.clone();
-    println!("line of {} moves:", moves.len());
+    println!("\nLine of {} moves:", moves.len());
     renderer.render(&current_pos);
     for m in moves {
         current_pos = current_pos.play(*m).unwrap();
-        println!();
+        println!("================================");
         renderer.render(&current_pos);
     }
 }

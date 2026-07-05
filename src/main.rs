@@ -13,7 +13,7 @@ fn main() {
     // let mv = san.to_move(&pos).unwrap();
     // let pos = pos.play(mv).unwrap();
     // renderer.render(&pos);
-    let search_result = engine::best_line(&pos, 6);
+    let search_result = engine::best_line(&pos, 6, std::time::Instant::now() + std::time::Duration::from_millis(1000)).unwrap();
     let mv = search_result.line.first().unwrap().clone();
     let pos = pos.play(mv).unwrap();
     renderer.render(&pos);
