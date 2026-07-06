@@ -1,83 +1,148 @@
-use shakmaty::{Chess, Position, Move, Role};
-use super::eval::{evaluate, piece_value};
+use shakmaty::zobrist::Zobrist64;
+use shakmaty::{Chess, EnPassantMode, Move, Position, Role};
 
-use std::{time::Instant};
+use super::eval::{evaluate, piece_value};
+use super::tt::{Tt, Bound};
+
+use std::{time::Instant, time::Duration};
 
 const MATE: i32 = 1_000_000;
-const MAX_POSSIBLE_SCORE: i32 =
-        piece_value(Role::Pawn) * 8
-        + piece_value(Role::Knight) * 2
-        + piece_value(Role::Bishop) * 2
-        + piece_value(Role::Rook) * 2
-        + piece_value(Role::Queen) * 1;
+const MATE_THRESHOLD: i32 =
+    piece_value(Role::Pawn) * 8
+    + piece_value(Role::Knight) * 2
+    + piece_value(Role::Bishop) * 2
+    + piece_value(Role::Rook) * 2
+    + piece_value(Role::Queen) * 1;
 
-pub struct SearchResult {
-    pub score: i32,
-    pub line: Vec<Move>,
+
+pub struct SearchContext {
+    pub tt: Tt,
+    pub node_count: u64,
+    pub deadline: Instant,
+    pub pv: Vec<Move>,
+}
+
+
+impl SearchContext {
+    pub fn new(tt_mb_size: usize, ms_timeout: u64) -> Self {
+        SearchContext {
+            tt: Tt::new(tt_mb_size),
+            node_count: 0,
+            deadline: Instant::now() + Duration::from_millis(ms_timeout),
+            pv: Vec::new(),
+        }
+    }
+}
+
+// store: convert node-relative → mate-relative (absolute)
+fn score_to_tt(score: i32, ply: u32) -> i32 {
+    if score >= MATE_THRESHOLD { score + ply as i32 }
+    else if score <= -MATE_THRESHOLD { score - ply as i32 }
+    else { score }
+}
+
+
+// probe: convert mate-relative → node-relative
+fn score_from_tt(score: i32, ply: u32) -> i32 {
+    if score >= MATE_THRESHOLD { score - ply as i32 }
+    else if score <= -MATE_THRESHOLD { score + ply as i32 }
+    else { score }
 }
 
 
 fn negamax(
-    pos: &Chess, 
-    depth: u32, 
+    search_ctx: &mut SearchContext,
+    pos: &Chess,
+    depth: u32,
     mut alpha: i32,
     beta: i32,
-    node_count: &mut u64,
     ply: u32,
-    deadline: Instant,
-) -> Option<SearchResult> {
-    *node_count += 1;
-    
-    let mut best_score = -(MATE + 1);
-    let mut best_line: Vec<Move> = Vec::new();
+    pv: &mut Vec<Move>,
+) -> Option<i32> {
+    search_ctx.node_count += 1;
+    pv.clear(); // no continuation until a move raises alpha
 
+    let mut best_score = -(MATE + 1);
+    let mut best_move: Option<Move> = None;
+    let alpha_orig = alpha;
     if pos.is_game_over() {
-        return Some(SearchResult { score: leaf_score(pos, depth), line: best_line });
+        return Some(leaf_score(pos, ply));
     }
 
     if depth == 0 {
-        return quiescence(pos, alpha, beta, node_count, deadline);
+        return quiescence(search_ctx, pos, alpha, beta);
     }
 
-    if *node_count & 0x7FF == 0 && Instant::now() >= deadline {
+    if search_ctx.node_count & 0x7FF == 0 && Instant::now() >= search_ctx.deadline {
         return None; // Time limit reached, return None to indicate search should stop
     }
     
+    let key = pos.zobrist_hash::<Zobrist64>(EnPassantMode::Legal).0;
+
+    if let Some(e) = search_ctx.tt.probe(key) {
+        if e.depth >= depth {
+            let usable = match e.bound {
+                Bound::Exact => true,
+                Bound::Lower => e.score >= beta,
+                Bound::Upper => e.score <= alpha,
+            };
+            if usable {
+                return Some(score_from_tt(e.score, ply));
+            }
+        }
+    }
+    let mut child_pv: Vec<Move> = Vec::new();
     for m in ordered_moves(pos) {
         let mut child = pos.clone();
         child.play_unchecked(m);
-        let mut child_result = negamax(&child, depth - 1, -beta, -alpha, node_count, ply + 1, deadline)?;
-        let score = -child_result.score;
+        let score = -negamax(search_ctx, &child, depth - 1, -beta, -alpha, ply + 1, &mut child_pv)?;
         if score > best_score {
             best_score = score;
-            child_result.line.push(m);
-            best_line = child_result.line;
+            best_move = Some(m);
         }
 
         if score > alpha {
             alpha = score;
+            // New best line at this node: this move followed by the child's PV.
+            pv.clear();
+            pv.push(m);
+            pv.extend_from_slice(&child_pv);
         }
 
         if alpha >= beta {
             break; // Beta cutoff
         }
     }
-    Some(SearchResult { score: best_score, line: best_line }) 
+
+    let bound = if best_score <= alpha_orig {
+        Bound::Upper          // never raised alpha → upper bound
+    } else if best_score >= beta {
+        Bound::Lower          // beta cutoff → lower bound
+    } else {
+        Bound::Exact          // alpha < score < beta → exact
+    };
+    search_ctx.tt.store(key, depth, score_to_tt(best_score, ply), bound, best_move);
+
+    Some(best_score) 
 }
 
 // make sure that the search does not stop in the middle if a trade or sequence of captures.
-fn quiescence(pos: &Chess, mut alpha: i32, beta: i32, node_count: &mut u64, deadline: Instant) -> Option<SearchResult> {
-    *node_count += 1;
+fn quiescence(
+    search_ctx: &mut SearchContext,
+    pos: &Chess, 
+    mut alpha: i32, 
+    beta: i32, 
+) -> Option<i32> {
+    search_ctx.node_count += 1;
     
     let stand_pat = evaluate(pos);
     if stand_pat >= beta {
-        return Some(SearchResult { score: beta, line: Vec::new() });
+        return Some(stand_pat);
     }
     if stand_pat > alpha {
         alpha = stand_pat;        // static eval is our baseline
     }
     let mut best_score = stand_pat;
-    let mut best_line: Vec<Move> = Vec::new();
 
     for m in ordered_moves(pos) {
         if !m.is_conversion() {
@@ -85,12 +150,9 @@ fn quiescence(pos: &Chess, mut alpha: i32, beta: i32, node_count: &mut u64, dead
         }
         let mut child = pos.clone();
         child.play_unchecked(m);
-        let mut child_result = quiescence(&child, -beta, -alpha, node_count, deadline)?;
-        let score = -child_result.score;
+        let score = -quiescence(search_ctx, &child, -beta, -alpha)?;
         if score > best_score {
             best_score = score;
-            child_result.line.push(m);
-            best_line = child_result.line;
         }
 
         if score > alpha {
@@ -101,7 +163,7 @@ fn quiescence(pos: &Chess, mut alpha: i32, beta: i32, node_count: &mut u64, dead
             break; // Beta cutoff
         }
     }
-    Some(SearchResult { score: best_score, line: best_line })
+    Some(best_score)
 }
 
 
@@ -136,38 +198,26 @@ fn leaf_score(pos: &Chess, ply: u32) -> i32 {
     }
 }
 
-pub fn best_line(pos: &Chess, depth: u32, deadline: Instant) -> Option<SearchResult> {
-    let mut best_score = -(MATE + 1);
-    let mut calc_line: Vec<Move> = Vec::new();
-    let mut node_count = 0;
-    let mut alpha = -(MATE + 1);
-    let beta = MATE + 1;
-    for m in ordered_moves(pos) {
-        let mut child = pos.clone();
-        child.play_unchecked(m);
-        let child_result = negamax(&child, depth - 1, -beta, -alpha, &mut node_count, 0, deadline)?;
-        let score = -child_result.score;
-        if score > best_score {
-            best_score = score;
-            alpha = score;
-            calc_line = child_result.line;
-            calc_line.push(m);
-        }
+pub fn depth_bound_search(search_ctx: &mut SearchContext, pos: &Chess, depth: u32) -> Option<i32> {
+    let mut pv = Vec::new();
+    let result = negamax(search_ctx, pos, depth, -(MATE + 1), MATE + 1, 0, &mut pv);
+    if result.is_some() {
+        // Only commit the PV of a fully completed search (not a timed-out one).
+        search_ctx.pv = pv;
     }
-    Some(SearchResult { score: best_score, line: calc_line.into_iter().rev().collect() })
+    result
 }
 
-pub fn time_bound_best_line(pos: &Chess, time_limit_ms: u64) -> Option<SearchResult> {
-    let deadline = Instant::now() + std::time::Duration::from_millis(time_limit_ms);
-    let mut best_result: Option<SearchResult> = None;
+pub fn time_bound_search(search_ctx: &mut SearchContext, pos: &Chess) -> Option<i32> {
+    let mut best_result: Option<i32> = None;
     for depth in 1.. {
-        if Instant::now() >= deadline {
+        if Instant::now() >= search_ctx.deadline {
             break;
         }
-        let result = best_line(pos, depth, deadline);
+        let result = depth_bound_search(search_ctx, pos, depth);
         if let Some(r) = result {
-            let is_mate = r.score.abs() >= MAX_POSSIBLE_SCORE;
-            best_result = Some(r);
+            best_result = result;
+            let is_mate = r.abs() >= MATE_THRESHOLD;
             if is_mate {
                 break; // Stop searching deeper if a mate is found
             }

@@ -50,12 +50,14 @@ fn parse_epd(text: &str) -> EpdCase {
 
 /// Run the engine and check its best move equals the EPD's bm.
 fn check_case(case: &EpdCase, renderer: &impl render::Renderer) {
-    let result = engine::time_bound_best_line(&case.pos, 10000).unwrap(); // 1 second time limit
-    let best = result.line.first().expect("engine returned no move");
-    render::render_line(&case.pos, &result.line[0..], renderer);
+    let mut search_ctx = engine::SearchContext::new(16, 1000);
+    engine::time_bound_search(&mut search_ctx, &case.pos).unwrap(); // 1 second time limit
+    let pv = &search_ctx.pv;
+    let best_move = pv.first().unwrap();
+    render::render_line(&case.pos, pv, renderer);
 
     // Convert engine's move to SAN to compare against the EPD (which uses SAN).
-    let played_san = San::from_move(&case.pos, *best).to_string();
+    let played_san = San::from_move(&case.pos, *best_move).to_string();
 
     assert_eq!(
         played_san, case.best_move_san,

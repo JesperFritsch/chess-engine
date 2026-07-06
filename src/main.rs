@@ -1,8 +1,8 @@
 
 use chess_engine::{engine, render};
-use shakmaty::{Chess, Position};
-use render::{TerminalRenderer, Renderer, render_line};
-
+use shakmaty::{Chess};
+use render::{TerminalRenderer, render_line};
+use engine::{SearchContext, depth_bound_search};
 // use shakmaty::{san::San};
 
 
@@ -13,9 +13,7 @@ fn main() {
     // let mv = san.to_move(&pos).unwrap();
     // let pos = pos.play(mv).unwrap();
     // renderer.render(&pos);
-    let search_result = engine::best_line(&pos, 6, std::time::Instant::now() + std::time::Duration::from_millis(1000)).unwrap();
-    let mv = search_result.line.first().unwrap().clone();
-    let pos = pos.play(mv).unwrap();
-    renderer.render(&pos);
-    render_line(&pos, &search_result.line[1..], &renderer);
+    let mut search_ctx = SearchContext::new(16, 1000);
+    depth_bound_search(&mut search_ctx, &pos, 6).unwrap();
+    render_line(&pos, &search_ctx.pv, &renderer);
 }   
