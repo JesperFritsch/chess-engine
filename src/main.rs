@@ -1,19 +1,11 @@
+use chess_engine::play::{play_game, SearchEngine};
+use chess_engine::tui::TuiFrontend;
 
-use chess_engine::{engine, render};
-use shakmaty::{Chess};
-use render::{TerminalRenderer, render_line};
-use engine::{SearchContext, depth_bound_search};
-// use shakmaty::{san::San};
-
-
-fn main() {
-    let pos = Chess::default();
-    let renderer = TerminalRenderer;
-    // let san: San = "e4".parse().unwrap();
-    // let mv = san.to_move(&pos).unwrap();
-    // let pos = pos.play(mv).unwrap();
-    // renderer.render(&pos);
-    let mut search_ctx = SearchContext::new(16, 1000);
-    depth_bound_search(&mut search_ctx, &pos, 6).unwrap();
-    render_line(&pos, &search_ctx.pv, &renderer);
-}   
+fn main() -> std::io::Result<()> {
+    // 64 MiB transposition table, ~2 seconds of thinking per move.
+    let mut engine = SearchEngine::new(1024, 2000);
+    let mut frontend = TuiFrontend::new()?;
+    play_game(&mut frontend, &mut engine)?;
+    // `frontend` restores the terminal on drop.
+    Ok(())
+}

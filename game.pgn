@@ -1,0 +1,17 @@
+[Event "Casual game"]
+[Site "Rust Chess TUI"]
+[Date "2026.07.08"]
+[Round "-"]
+[White "Human"]
+[Black "Rust Chess Engine"]
+[Result "1-0"]
+
+1. e4 a6 2. d4 a5 3. Nf3 a4 4. Nc3 c6 5. d5 cxd5 6. Nxd5 d6 7. Bb5+ Bd7 8. Qd3
+e6 9. Bxd7+ Nxd7 10. Nc3 e5 11. Qc4 Ra5 12. Ng5 Nh6 13. O-O b6 14. Nd5 Nc5 15.
+Be3 b5 16. Qe2 f6 17. Bxc5 dxc5 18. Ne6 Qd7 19. Rad1 Qc6 20. Ndc7+ Ke7 21. Qd3
+b4 22. Qd8+ Kf7 23. Rd7+ Qxd7 24. Qxd7+ Be7 25. Nxg7 Kxg7 26. Qxe7+ Kg6 27. Ne8
+Rxe8 28. Qxe8+ Kg5 29. g3 Ra7 30. h4+ Kg4 31. Kg2 Rf7 32. f3+ Kh5 33. Kh3 a3 34.
+g4+ Kg6 35. bxa3 Kg7 36. axb4 cxb4 37. Rd1 b3 38. axb3 Rf8 39. Rd7+ Nf7 40. Qe6
+h6 41. g5 hxg5 42. hxg5 fxg5 43. Qxe5+ Kg6 44. Qf5+ Kh6 45. Rxf7 Rxf7 46. Qxf7
+g4+ 47. fxg4 Kg5 48. Qf5+ Kh6 49. e5 Kg7 50. e6 Kh6 51. c4 Kg7 52. b4 Kh6 53. e7
+Kg7 54. c5 Kh6 55. e8=Q Kg7 56. Qeg6+ Kh8 57. Qf8# 1-0
