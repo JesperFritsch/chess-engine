@@ -2,6 +2,7 @@
 mod eval;
 mod search;
 mod tt;
+mod interface;
 
 pub use tt::{
     Tt,
