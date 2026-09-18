@@ -1,28 +1,28 @@
 use vampirc_uci::parse_with_unknown;
 use vampirc_uci::{UciMessage, MessageList, UciTimeControl, Serializable};
+use crate::engine::{ChessEngine, SearchControl, SearchHandle, SearchProgress, SearchResult};
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, BufReader, Write};
+use std::sync::mpsc::{self, Sender};
+use std::thread;
 
-pub fn run() {
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    run_with(stdin.lock(), stdout.lock());
+
+pub enum Event {
+    Line(String),
 }
 
-pub fn run_with<R: BufRead, W: Write>(input: R, mut output: W) {
-    for line in input.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-        let m_list = parse_with_unknown(line.as_str());
-        for message in m_list {
-            match message {
-                UciMessage::Unknown(_, _) => {}
-                _ => {}
-            }
+pub fn run() {
+    run_with(BufReader::new(io::stdin()), io::stdout().lock());
+}
+
+pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W) {
+    let (tx, rx) = mpsc::channel::<Event>();
+    let line_tx: Sender<Event> = tx.clone();
+    thread::spawn(move || {
+        for line in input.lines() {
+            let Ok(line) = line else {break};
         }
-    }
+    })
 }
 
 

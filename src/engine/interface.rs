@@ -1,34 +1,97 @@
-use shakmaty::{Move};
+use shakmaty::{Move, Chess};
+use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 
 
-pub struct Score {
-    cp: f32, // Score in centipawns
-    mate_in: i32, // mate in x moves, negative if getting mated
+pub enum Score {
+    Cp(i32), // Score in centipawns
+    Mate(i32), // mate in x moves, negative if getting mated
 }
 
 
-pub struct SearchInfo {
-    depth: u32, // depth in plies
-    search_time: u32, // time searched in ms
-    nodes_searched: u32,
-    pv: Vec<Move>,
-    curr_v: Vec<Move>,
-    score: Score,
-    curr_move: Move,
-    curr_move_num: u32, // the currently searched move, 1 for first move.
-    hashfull: u32, // hash full in permill (0 - 1000)
-    nodes_per_s: u32,
+pub struct Clock {
+    pub remaining: Duration,
+    pub opp_remaining: Duration,
+    pub increment: Duration,
+    pub moves_to_go: Option<u32>,
+    pub running: bool,
+}
+
+
+pub struct Limits {
+    pub deadline: Option<Instant>,
+    pub max_depth: Option<u32>,
+    pub max_nodes: Option<u64>,
+    pub restrict_to: Option<Vec<Move>>,
+}
+
+
+pub struct SearchProgress<'a> {
+    pub depth: u32, // depth in plies
+    pub seldepth: u32, // absolute max depth, even for extensions and quiescense
+    pub search_time: Duration, // time searched in ms
+    pub nodes: u64,
+    pub pv: &'a [Move],
+    pub score: Score,
+    pub hashfull: u32, // hash full in permill (0 - 1000)
+    pub nodes_per_s: u32,
+}
+
+
+pub struct SearchResult {
+    pub best_move: Option<Move>,
+    pub pv: Vec<Move>,
+    pub score: Score,
+    pub depth: u32,
+    pub nodes: u64,
+}
+
+
+pub struct SearchControl {
+    pub clock: Clock,
+    pub limits: Limits
 }
 
 
 pub struct Options {
-    hash_size_mb: u32, // MB size of the hash table
-    ponder: bool,
+    pub hash_size_mb: u32, // MB size of the hash table
+    pub ponder: bool, // if the engine is able to search prospect moves, while opponents turn.
 }
 
 
+#[derive(Clone)]
+pub struct SearchHandle{
+    pub stop: Arc<AtomicBool>,
+    pub control: Arc<Mutex<SearchControl>>,
+}
+
+impl SearchHandle {
+    pub fn stop(&self) {self.stop.store(true, Ordering::Relaxed)}
+    pub fn reset(&self) {self.stop.store(false, Ordering::Relaxed)}
+    pub fn is_stopped(&self) -> bool {self.stop.load(Ordering::Relaxed)}
+    pub fn set_control(&self, control: SearchControl) {
+        *self.control.lock().unwrap() = control;
+    }
+}
+
 pub trait ChessEngine {
-    pub fn get_search_info() -> SearchInfo;
-    pub fn get_options() -> Options;
-    pub fn set_options(options: Options);
+    fn set_position(
+        &mut self, 
+        pos: Chess
+    );
+
+    fn opponent_move(
+        &mut self, 
+        mv: Move
+    ) -> Result<(), String>;
+
+    fn best_move(
+        &mut self, 
+        ctrl: SearchControl,
+        on_progress: &mut dyn FnMut(SearchProgress),
+    ) -> SearchResult;
+
+    fn search_handle(
+        &self
+    ) -> SearchHandle;
 }

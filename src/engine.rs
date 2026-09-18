@@ -17,3 +17,12 @@ pub use search::{
     SearchContext,
     SearchInfo,
 };
+
+
+pub use interface::{
+    SearchControl,
+    SearchHandle,
+    SearchProgress,
+    SearchResult,
+    ChessEngine
+};
