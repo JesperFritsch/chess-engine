@@ -29,7 +29,7 @@ pub struct Limits {
 pub struct SearchProgress<'a> {
     pub depth: u32, // depth in plies
     pub seldepth: u32, // absolute max depth, even for extensions and quiescense
-    pub search_time: Duration, // time searched in ms
+    pub elapsed: Duration, // time searched in ms
     pub nodes: u64,
     pub pv: &'a [Move],
     pub score: Score,
@@ -49,13 +49,14 @@ pub struct SearchResult {
 
 pub struct SearchControl {
     pub clock: Clock,
-    pub limits: Limits
+    pub limits: Limits,
+    pub ponder: bool, // if the engine is able to search prospect moves, while opponents turn.
+    
 }
 
 
 pub struct Options {
     pub hash_size_mb: u32, // MB size of the hash table
-    pub ponder: bool, // if the engine is able to search prospect moves, while opponents turn.
 }
 
 
@@ -80,7 +81,7 @@ pub trait ChessEngine {
         pos: Chess
     );
 
-    fn opponent_move(
+    fn play_move(
         &mut self, 
         mv: Move
     ) -> Result<(), String>;
@@ -90,6 +91,11 @@ pub trait ChessEngine {
         ctrl: SearchControl,
         on_progress: &mut dyn FnMut(SearchProgress),
     ) -> SearchResult;
+    
+    fn set_hash_size_mb(
+        &mut self, 
+        mb: u32,
+    );
 
     fn search_handle(
         &self
