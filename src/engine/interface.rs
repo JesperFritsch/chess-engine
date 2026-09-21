@@ -8,17 +8,25 @@ pub enum Score {
     Mate(i32), // mate in x moves, negative if getting mated
 }
 
+#[derive(Default)]
+pub enum TimeMode {
+    #[default]
+    Unbound,
+    Fixed(Duration),
+    Clock(Clock)
+}
+
 
 pub struct Clock {
     pub remaining: Duration,
     pub opp_remaining: Duration,
     pub increment: Duration,
     pub moves_to_go: Option<u32>,
-    pub running: bool,
 }
 
-
+#[derive(Default)]
 pub struct Limits {
+    pub time_mode: TimeMode,
     pub deadline: Option<Instant>,
     pub max_depth: Option<u32>,
     pub max_nodes: Option<u64>,
@@ -47,33 +55,45 @@ pub struct SearchResult {
 }
 
 
-pub struct SearchControl {
-    pub clock: Clock,
-    pub limits: Limits,
-    pub ponder: bool, // if the engine is able to search prospect moves, while opponents turn.
-    
-}
-
-
-pub struct Options {
-    pub hash_size_mb: u32, // MB size of the hash table
+pub struct SearchHandleInner {
+    stop: AtomicBool,
+    limits: Mutex<Limits>,
 }
 
 
 #[derive(Clone)]
-pub struct SearchHandle{
-    pub stop: Arc<AtomicBool>,
-    pub control: Arc<Mutex<SearchControl>>,
-}
+pub struct SearchHandle(
+    Arc<SearchHandleInner>
+);
 
 impl SearchHandle {
-    pub fn stop(&self) {self.stop.store(true, Ordering::Relaxed)}
-    pub fn reset(&self) {self.stop.store(false, Ordering::Relaxed)}
-    pub fn is_stopped(&self) -> bool {self.stop.load(Ordering::Relaxed)}
-    pub fn set_control(&self, control: SearchControl) {
-        *self.control.lock().unwrap() = control;
+    pub fn new(limits: Limits) -> Self{
+        SearchHandle (
+            Arc::new(SearchHandleInner {
+                stop: AtomicBool::new(false),
+                limits: Mutex::new(limits),
+            })
+        )
+    }
+    pub fn stop(&self) {self.0.stop.store(true, Ordering::Relaxed)}
+    pub fn reset(&self) {self.0.stop.store(false, Ordering::Relaxed)}
+    pub fn is_stopped(&self) -> bool {self.0.stop.load(Ordering::Relaxed)}
+    pub fn set_limits(&self, limits: Limits) {
+        *self.0.limits.lock().unwrap() = limits;
+    }
+    pub fn with_limits<T>(self, f: impl FnOnce(&Limits) -> T) -> T {
+        f(&self.0.limits.lock().unwrap())
     }
 }
+
+impl Default for SearchHandle {
+    fn default() -> Self { Self::new(Limits::default())}
+}
+
+
+#[derive(Debug)]
+pub struct IllegalMove(pub Move);
+
 
 pub trait ChessEngine {
     fn set_position(
@@ -84,17 +104,16 @@ pub trait ChessEngine {
     fn play_move(
         &mut self, 
         mv: Move
-    ) -> Result<(), String>;
+    ) -> Result<(), IllegalMove>;
 
     fn best_move(
         &mut self, 
-        ctrl: SearchControl,
-        on_progress: &mut dyn FnMut(SearchProgress),
+        on_progress: &mut dyn FnMut(&SearchProgress),
     ) -> SearchResult;
     
     fn set_hash_size_mb(
         &mut self, 
-        mb: u32,
+        mb: usize,
     );
 
     fn search_handle(

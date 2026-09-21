@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use shakmaty::{Chess, Color, Move, Position};
 use shakmaty::san::SanPlus;
+use crate::engine::ChessEngine;
 
 use crate::engine::{time_bound_search_with_progress, SearchContext, SearchInfo};
 
@@ -63,46 +64,6 @@ pub trait Frontend {
     /// (`pgn` is the complete, ready-to-write game record), then wait for
     /// acknowledgement.
     fn game_over(&mut self, view: &BoardView, pgn: &str) -> io::Result<()>;
-}
-
-/// A move-producing opponent. Keeps the loop independent of engine internals.
-pub trait ChessEngine {
-    /// Return a move to play in `pos`, or `None` if it cannot (e.g. no legal
-    /// moves — though the loop checks game-over first). `on_progress` is called
-    /// with intermediate search info (e.g. once per completed depth) so a UI can
-    /// display live progress.
-    fn best_move(
-        &mut self,
-        pos: &Chess,
-        on_progress: &mut dyn FnMut(&SearchInfo),
-    ) -> Option<Move>;
-}
-
-/// The project's search engine, adapted to [`ChessEngine`].
-pub struct SearchEngine {
-    tt_mb: usize,
-    move_ms: u64,
-}
-
-impl SearchEngine {
-    /// `tt_mb`: transposition-table size in MiB. `move_ms`: thinking time per
-    /// move in milliseconds.
-    pub fn new(tt_mb: usize, move_ms: u64) -> Self {
-        SearchEngine { tt_mb, move_ms }
-    }
-}
-
-impl ChessEngine for SearchEngine {
-    fn best_move(
-        &mut self,
-        pos: &Chess,
-        on_progress: &mut dyn FnMut(&SearchInfo),
-    ) -> Option<Move> {
-        // A fresh context per move keeps the deadline relative to "now".
-        let mut ctx = SearchContext::new(self.tt_mb, self.move_ms);
-        time_bound_search_with_progress(&mut ctx, pos, on_progress);
-        ctx.pv.first().copied()
-    }
 }
 
 /// Drive a full game between the human (via `front`) and the `engine`.
