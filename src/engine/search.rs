@@ -10,6 +10,8 @@ use super::interface::{ChessEngine,
     SearchResult,
     IllegalMove,
     Limits,
+    TimeMode,
+    Clock,
     Score
 };
 use std::{time::Instant, time::Duration};
@@ -22,6 +24,7 @@ const MATE_THRESHOLD: i32 =
     + piece_value(Role::Rook) * 2
     + piece_value(Role::Queen) * 1;
 
+const CHECK_STOP_AFTER: u64 = 2000;
 
 // The deepest ply we keep per-ply killer slots for. Searches never get near
 // this in practice; deeper plies just fall back to the last slot.
@@ -31,6 +34,10 @@ pub struct SearchContext {
     pub depth: u32,
     pub node_count: u64,
     pub pv: Vec<Move>,
+    pub limits: Limits,
+    pub limits_seq: u64,
+    pub deadline: Option<Instant>,
+    node_check_count: u64,
     // Two "killer" quiet moves per ply: quiet moves that recently caused a beta
     // cutoff at this distance from the root. They tend to work again in sibling
     // positions, so we try them right after captures.
@@ -47,6 +54,10 @@ impl SearchContext {
             depth: 0,
             node_count: 0,
             pv: Vec::new(),
+            limits: Limits::default(),
+            limits_seq: 0,
+            deadline: None,
+            node_check_count: 0,
             killers: [[None; 2]; MAX_PLY],
             history: [[0; 64]; 64],
         }
@@ -72,6 +83,7 @@ impl SearchEngine {
             search_ctx: SearchContext::new()
         }
     }
+    
 
     #[allow(clippy::too_many_arguments)]
     fn negamax(
@@ -110,7 +122,8 @@ impl SearchEngine {
             return self.quiescence(pos, alpha, beta);
         }
 
-        if self.search_ctx.node_count & 0x7FF == 0 && Instant::now() >= self.search_ctx.deadline {
+        if self.search_ctx.node_count >= self.search_ctx.node_check_count && self.should_stop() {
+            self.search_ctx.node_check_count = self.search_ctx.node_count + CHECK_STOP_AFTER;
             return None; // Time limit reached, return None to indicate search should stop
         }
         
@@ -322,32 +335,47 @@ impl SearchEngine {
     ) -> Option<i32> {
         let start = Instant::now();
         let mut best_result: Option<i32> = None;
+        // Refresh limits
+        self.search_ctx.limits = self.search_handle.with_limits(|l| l.clone());
         for depth in 1.. {
-            let s_start = Instant::now();
-            if s_start >= self.search_ctx.deadline {
-                break;
-            }
+            if self.search_ctx.limits.max_depth.is_some_and(|d| depth > d) { break }
             let result = self.depth_bound_search(pos, depth);
-            if let Some(r) = result {
-                self.search_ctx.depth = depth;
-                best_result = result;
-                on_progress(&SearchProgress {
-                    depth,
-                    seldepth: depth,
-                    score: mate_in(r).map(Score::Mate).unwrap_or(Score::Cp(r)),
-                    nodes: self.search_ctx.node_count,
-                    pv: &self.search_ctx.pv,
-                    elapsed: start.elapsed(),
-                    nodes_per_s: 0,
-                    hashfull: (self.tt.fill_fraction() * 1000.0) as u32
+            let Some(r) = result else { break };
+            self.search_ctx.depth = depth;
+            best_result = result;
+            on_progress(&SearchProgress {
+                depth,
+                seldepth: depth,
+                score: mate_in(r).map(Score::Mate).unwrap_or(Score::Cp(r)),
+                nodes: self.search_ctx.node_count,
+                pv: &self.search_ctx.pv,
+                elapsed: start.elapsed(),
+                nodes_per_s: 0,
+                hashfull: (self.tt.fill_fraction() * 1000.0) as u32
 
-                });
-                if r.abs() >= MATE_THRESHOLD {
-                    break; // Stop searching deeper if a mate is found
-                }
+            });
+            if r.abs() >= MATE_THRESHOLD && !matches!(self.search_ctx.limits.time_mode, TimeMode::Unbound) {
+                break; // Stop searching deeper if a mate is found
             }
         }
         best_result
+    }
+    
+
+    fn should_stop(&mut self) -> bool {
+        let seq = self.search_handle.limits_seq();
+        let now = Instant::now();
+        if seq != self.search_ctx.limits_seq {
+            self.search_ctx.limits = self.search_handle.with_limits(|l| l.clone());
+            self.search_ctx.deadline = calc_deadline(&self.search_ctx.limits, now);
+            self.search_ctx.limits_seq = seq;
+        }
+        if self.search_ctx.deadline.is_some_and(|i| now >= i)
+            || self.search_ctx.limits.max_nodes.is_some_and(|n| self.search_ctx.node_count >= n)
+            || self.search_handle.is_stopped() {
+            return true;
+        }
+        false
     }
 }
 
@@ -424,6 +452,22 @@ fn score_from_tt(score: i32, ply: u32) -> i32 {
 }
 
 
+fn calc_deadline(limits: &Limits, time_now: Instant) -> Option<Instant> {
+    match limits.time_mode {
+        TimeMode::Unbound => None,
+        TimeMode::Fixed(duration) => {
+            Some(time_now + duration)
+        },
+        TimeMode::Clock(clock) => {
+            let base = match clock.moves_to_go {
+                Some(m) => clock.remaining / m.max(1) + clock.increment * 3 / 4,
+                None => clock.remaining / 25 + clock.increment * 3 / 4,
+            };
+            let cap = clock.remaining.saturating_sub(Duration::from_millis(100)) / 2;
+            Some(time_now + base.min(cap))
+        }
+    }
+}
 
 
 // Move-ordering score tiers, from most to least promising. The gaps keep the

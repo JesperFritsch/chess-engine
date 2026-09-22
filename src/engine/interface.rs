@@ -1,6 +1,14 @@
 use shakmaty::{Move, Chess};
 use std::time::{Duration, Instant};
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc, 
+    Mutex, 
+    atomic::{
+        AtomicBool, 
+        Ordering,
+        AtomicU64
+    }
+};
 
 
 pub enum Score {
@@ -8,7 +16,7 @@ pub enum Score {
     Mate(i32), // mate in x moves, negative if getting mated
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub enum TimeMode {
     #[default]
     Unbound,
@@ -16,7 +24,7 @@ pub enum TimeMode {
     Clock(Clock)
 }
 
-
+#[derive(Clone, Copy)]
 pub struct Clock {
     pub remaining: Duration,
     pub opp_remaining: Duration,
@@ -24,10 +32,9 @@ pub struct Clock {
     pub moves_to_go: Option<u32>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Limits {
     pub time_mode: TimeMode,
-    pub deadline: Option<Instant>,
     pub max_depth: Option<u32>,
     pub max_nodes: Option<u64>,
     pub restrict_to: Option<Vec<Move>>,
@@ -44,7 +51,7 @@ pub struct SearchProgress<'a> {
     pub hashfull: u32, // hash full in permill (0 - 1000)
     pub nodes_per_s: u32,
 }
-
+                
 
 pub struct SearchResult {
     pub best_move: Option<Move>,
@@ -58,6 +65,7 @@ pub struct SearchResult {
 pub struct SearchHandleInner {
     stop: AtomicBool,
     limits: Mutex<Limits>,
+    limits_seq: AtomicU64
 }
 
 
@@ -72,6 +80,7 @@ impl SearchHandle {
             Arc::new(SearchHandleInner {
                 stop: AtomicBool::new(false),
                 limits: Mutex::new(limits),
+                limits_seq: AtomicU64::new(0),
             })
         )
     }
@@ -80,8 +89,10 @@ impl SearchHandle {
     pub fn is_stopped(&self) -> bool {self.0.stop.load(Ordering::Relaxed)}
     pub fn set_limits(&self, limits: Limits) {
         *self.0.limits.lock().unwrap() = limits;
+        self.0.limits_seq.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn with_limits<T>(self, f: impl FnOnce(&Limits) -> T) -> T {
+    pub fn limits_seq(&self) -> u64 {self.0.limits_seq.load(Ordering::Acquire)}
+    pub fn with_limits<T>(&self, f: impl FnOnce(&Limits) -> T) -> T {
         f(&self.0.limits.lock().unwrap())
     }
 }

@@ -4,24 +4,24 @@ mod search;
 mod tt;
 mod interface;
 
+use shakmaty::Chess;
 pub use tt::{
     Tt,
     TtEntry,
 };
 
 pub use search::{
-    depth_bound_search,
     mate_in,
-    time_bound_search_with_progress,
     SearchContext,
-    SearchInfo,
+    SearchEngine
 };
 
 
 pub use interface::{
-    SearchControl,
     SearchHandle,
     SearchProgress,
     SearchResult,
     ChessEngine
 };
+
+
