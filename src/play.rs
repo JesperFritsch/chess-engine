@@ -14,9 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use shakmaty::{Chess, Color, Move, Position};
 use shakmaty::san::SanPlus;
-use crate::engine::ChessEngine;
 
-use crate::engine::{time_bound_search_with_progress, SearchContext, SearchInfo};
+use crate::engine::{ChessEngine, SearchProgress};
 
 /// Everything a front end needs to render a single game position.
 ///
@@ -58,7 +57,7 @@ pub trait Frontend {
     /// Update the display with the engine's latest completed search depth, in
     /// real time. Called once per depth while the engine thinks. Progress
     /// updates are best-effort, so this returns `()` rather than a `Result`.
-    fn thinking(&mut self, view: &BoardView, info: &SearchInfo);
+    fn thinking(&mut self, view: &BoardView, info: &SearchProgress);
 
     /// Show the final position and result, offer to save the game as PGN
     /// (`pgn` is the complete, ready-to-write game record), then wait for
@@ -100,6 +99,7 @@ pub fn play_game(front: &mut dyn Frontend, engine: &mut dyn ChessEngine) -> io::
                     history.push(san);
                     last_move = Some(mv);
                     pos = pos.play(mv).expect("front end returned a legal move");
+                    engine.play_move(mv).expect("This move should have been good");
                 }
                 PlayerMove::Quit => return Ok(()),
             }
@@ -112,14 +112,16 @@ pub fn play_game(front: &mut dyn Frontend, engine: &mut dyn ChessEngine) -> io::
             };
             front.show(&view)?;
             // Forward each completed depth to the front end for a live display.
-            let chosen = engine.best_move(&pos, &mut |info| front.thinking(&view, info));
+            let res = engine.search(&mut |info| front.thinking(&view, info));
+            let chosen = res.best_move;
             match chosen {
                 Some(mv) => {
                     let san = SanPlus::from_move(pos.clone(), mv).to_string();
-                    last_note = Some(format!("Engine played {san}."));
+                    last_note = Some(format!("Engine played {san} after reaching depth {} and {} nodes.", res.depth, res.nodes));
                     history.push(san);
                     last_move = Some(mv);
                     pos = pos.play(mv).expect("engine returned a legal move");
+                    engine.play_move(mv).expect("This move should have been good");
                 }
                 None => break,
             }

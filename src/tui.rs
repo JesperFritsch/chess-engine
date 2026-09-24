@@ -24,7 +24,7 @@ use crossterm::{
 };
 use shakmaty::{Color as ChessColor, File, Move, Position, Rank, Role, Square};
 
-use crate::engine::{mate_in, SearchInfo};
+use crate::engine::{SearchProgress};
 use crate::play::{BoardView, Frontend, PlayerMove};
 
 // --- Palette -----------------------------------------------------------------
@@ -143,7 +143,7 @@ impl Frontend for TuiFrontend {
         self.draw_board(view, None, None, &[])
     }
 
-    fn thinking(&mut self, _view: &BoardView, info: &SearchInfo) {
+    fn thinking(&mut self, _view: &BoardView, info: &SearchProgress) {
         // Best-effort live update. The board doesn't change while the engine
         // thinks, so we only refresh the info line beneath it (drawn once by the
         // preceding `show`). Ignore write errors — this is cosmetic.
@@ -256,13 +256,13 @@ impl TuiFrontend {
     /// without redrawing the static board. The principal variation is
     /// deliberately *not* shown — it would reveal the engine's expected best line
     /// (including the human's replies), an unfair hint.
-    fn draw_thinking(&mut self, info: &SearchInfo) -> io::Result<()> {
+    fn draw_thinking(&mut self, info: &SearchProgress) -> io::Result<()> {
         let secs = info.elapsed.as_secs_f64();
         let knps = if secs > 0.0 { info.nodes as f64 / secs / 1000.0 } else { 0.0 };
         let line = format!(
             "Engine thinking…  depth {}  score {}  {:.0}kn  {:.0}kn/s  {:.1}s",
             info.depth,
-            format_score(info.score),
+            &info.score,
             info.nodes as f64 / 1000.0,
             knps,
             secs,
@@ -498,15 +498,6 @@ fn piece_glyph(role: Role) -> char {
     }
 }
 
-/// Format a search score from the engine's point of view: a mate distance like
-/// `#3` / `-#2`, otherwise centipawns as `+0.35`.
-fn format_score(score: i32) -> String {
-    match mate_in(score) {
-        Some(n) if n > 0 => format!("#{n}"),
-        Some(n) => format!("-#{}", -n),
-        None => format!("{:+.2}", score as f64 / 100.0),
-    }
-}
 
 /// Legal destination squares for a piece standing on `from`.
 fn targets_from(legal: &[Move], from: Square) -> Vec<Square> {

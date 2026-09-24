@@ -1,8 +1,8 @@
-use chess_engine::engine::{depth_bound_search, SearchContext};
+use chess_engine::engine;
+use chess_engine::engine::{ChessEngine, Score};
 use shakmaty::{CastlingMode, Chess};
 use shakmaty::fen::Fen;
-use std::time::Instant;
-
+use std::time::{Instant, Duration};
 /// Run explicitly with:
 ///   cargo test --release --test nodes_bench -- --ignored --nocapture
 /// Used to A/B the impact of each search improvement.
@@ -20,23 +20,25 @@ fn bench_nodes_to_fixed_depth() {
     // How deep can we get in a fixed 2-second budget? This is the metric that
     // maps to playing strength. The 2s deadline lives in the context, so an
     // iteration that runs out of time returns None and we stop.
-    let mut ctx = SearchContext::new(256, 2000);
     let t = Instant::now();
-    let mut reached = 0;
-    let mut score = 0;
-    for depth in 1..=64 {
-        match depth_bound_search(&mut ctx, &pos, depth) {
-            Some(s) => {
-                score = s;
-                reached = depth;
-            }
-            None => break, // deadline hit mid-iteration
+    let mut engine = engine::SearchEngine::new(500);
+    engine.search_handle().set_limits(
+        engine::Limits {
+            time_mode: engine::TimeMode::Fixed(Duration::from_secs_f64(2.0)),
+            max_depth: None,
+            max_nodes: None,
+            restrict_to: None
         }
-    }
+    );
+    engine.set_position(pos.clone());
+    let res = engine.search(&mut |_|{});
+
     let dt = t.elapsed();
     println!(
-        "in ~2s: reached depth {reached}, nodes={} score={score} time={:.3}s",
-        ctx.node_count,
+        "in ~2s: reached depth {}, nodes={} score={} time={:.3}s",
+        res.depth,
+        res.nodes,
+        res.score.unwrap(),
         dt.as_secs_f64()
     );
 }

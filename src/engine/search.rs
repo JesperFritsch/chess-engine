@@ -11,7 +11,6 @@ use super::interface::{ChessEngine,
     IllegalMove,
     Limits,
     TimeMode,
-    Clock,
     Score
 };
 use std::{time::Instant, time::Duration};
@@ -22,7 +21,7 @@ const MATE_THRESHOLD: i32 =
     + piece_value(Role::Knight) * 2
     + piece_value(Role::Bishop) * 2
     + piece_value(Role::Rook) * 2
-    + piece_value(Role::Queen) * 1;
+    + piece_value(Role::Queen);
 
 const CHECK_STOP_AFTER: u64 = 2000;
 
@@ -31,7 +30,7 @@ const CHECK_STOP_AFTER: u64 = 2000;
 const MAX_PLY: usize = 128;
 
 pub struct SearchContext {
-    pub depth: u32,
+    pub depth: u8,
     pub node_count: u64,
     pub pv: Vec<Move>,
     pub limits: Limits,
@@ -47,6 +46,11 @@ pub struct SearchContext {
     history: [[i32; 64]; 64],
 }
 
+impl Default for SearchContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl SearchContext {
     pub fn new() -> Self {
@@ -89,10 +93,10 @@ impl SearchEngine {
     fn negamax(
         &mut self,
         pos: &Chess,
-        mut depth: u32,
+        mut depth: u8,
         mut alpha: i32,
         beta: i32,
-        ply: u32,
+        ply: u8,
         pv: &mut Vec<Move>,
         // Whether null-move pruning is permitted at this node. Disabled inside the
         // null search (no two null moves in a row) and inside the verification
@@ -162,9 +166,9 @@ impl SearchEngine {
             && depth >= 3
             && !node_in_check
             && beta.abs() < MATE_THRESHOLD
-            && has_non_pawn_material(&pos)
+            && has_non_pawn_material(pos)
         {
-            let reduction = 2 + (depth >= 6) as u32;
+            let reduction = 2 + (depth >= 6) as u8;
             if let Ok(null_pos) = pos.clone().swap_turn() {
                 let mut null_pv = Vec::new();
                 // The null child cannot null again (allow_null = false).
@@ -317,7 +321,7 @@ impl SearchEngine {
     pub fn depth_bound_search(
         &mut self,
         pos: &Chess,
-        depth: u32
+        depth: u8
     ) -> Option<i32> {
         let mut pv = Vec::new();
         let result = self.negamax(pos, depth, -(MATE + 1), MATE + 1, 0, &mut pv, true);
@@ -326,17 +330,64 @@ impl SearchEngine {
             self.search_ctx.pv = pv;
         }
         result
+    } 
+
+    fn should_stop(&mut self) -> bool {
+        let seq = self.search_handle.limits_seq();
+        let now = Instant::now();
+        if seq != self.search_ctx.limits_seq {
+            self.search_ctx.limits = self.search_handle.with_limits(|l| l.clone());
+            self.search_ctx.deadline = calc_deadline(&self.search_ctx.limits, now);
+            self.search_ctx.limits_seq = seq;
+        }
+        if self.search_ctx.deadline.is_some_and(|i| now >= i)
+            || self.search_ctx.limits.max_nodes.is_some_and(|n| self.search_ctx.node_count >= n)
+            || self.search_handle.is_stopped() {
+            return true;
+        }
+        false
     }
 
-    pub fn search(
+    fn reset_ctx(&mut self) {
+        self.search_ctx.limits = self.search_handle.with_limits(|l| l.clone());
+        self.search_ctx.limits_seq = self.search_handle.limits_seq();
+        self.search_ctx.deadline = calc_deadline(&self.search_ctx.limits, Instant::now());
+        self.search_ctx.depth = 0;
+        self.search_ctx.node_check_count = 0;
+        self.search_ctx.node_count = 0;
+        self.search_ctx.pv.clear();
+        self.search_ctx.killers = [[None; 2]; MAX_PLY];
+    }
+
+}
+
+impl ChessEngine for SearchEngine {
+    fn set_position(
+        &mut self, 
+        pos: Chess
+    ) {
+        self.pos = pos
+    }
+
+    fn play_move(
+        &mut self, 
+        mv: Move
+    ) -> Result<(), IllegalMove> {
+        if !self.pos.is_legal(mv) {
+            return Err(IllegalMove(mv));
+        }
+        self.pos.play_unchecked(mv);
+        Ok(())
+    }
+    
+    fn search(
         &mut self,
         on_progress: &mut dyn FnMut(&SearchProgress),
     ) -> SearchResult {
         let start = Instant::now();
         let mut best_result: Option<i32> = None;
         let pos = self.pos.clone();
-        // Refresh limits
-        self.search_ctx.limits = self.search_handle.with_limits(|l| l.clone());
+        self.reset_ctx();
         for depth in 1.. {
             if self.search_ctx.limits.max_depth.is_some_and(|d| depth > d) { break }
             let result = self.depth_bound_search(&pos, depth);
@@ -366,72 +417,18 @@ impl SearchEngine {
             nodes: self.search_ctx.node_count
         }
     }
-    
 
-    fn should_stop(&mut self) -> bool {
-        let seq = self.search_handle.limits_seq();
-        let now = Instant::now();
-        if seq != self.search_ctx.limits_seq {
-            self.search_ctx.limits = self.search_handle.with_limits(|l| l.clone());
-            self.search_ctx.deadline = calc_deadline(&self.search_ctx.limits, now);
-            self.search_ctx.limits_seq = seq;
-        }
-        if self.search_ctx.deadline.is_some_and(|i| now >= i)
-            || self.search_ctx.limits.max_nodes.is_some_and(|n| self.search_ctx.node_count >= n)
-            || self.search_handle.is_stopped() {
-            return true;
-        }
-        false
-    }
-}
-
-impl ChessEngine for SearchEngine {
-    fn set_position(
-        &mut self, 
-        pos: Chess
-    ) {
-        self.pos = pos
-    }
-
-    fn play_move(
-        &mut self, 
-        mv: Move
-    ) -> Result<(), IllegalMove> {
-        if !self.pos.is_legal(mv) {
-            return Err(IllegalMove(mv));
-        }
-        self.pos.play_unchecked(mv);
-        Ok(())
-    }
-
-    fn best_move(
-        &mut self, 
-        on_progress: &mut dyn FnMut(&SearchProgress),
-    ) -> SearchResult {
-        self.search_ctx = SearchContext::new();
-        let root = self.pos.clone();
-        let score = self.search(&root, on_progress);
-        let final_score: Score;
-        if let Some(s) = score {
-            final_score = mate_in(s).map(Score::Mate).unwrap_or(Score::Cp(s));
-        } else {
-            final_score = Score::Cp(0);
-        }
-
-        SearchResult {
-            best_move: self.search_ctx.pv.first().copied(),
-            pv: self.search_ctx.pv.clone(),
-            score: final_score, 
-            nodes: self.search_ctx.node_count,
-            depth: self.search_ctx.depth,
-        }
-    }
-    
     fn set_hash_size_mb(
         &mut self, 
         mb: usize,
     ) {
         self.tt.resize(mb);
+    }
+
+    fn clear(
+        &mut self
+    ) {
+        self.tt.clear();
     }
 
     fn search_handle(
@@ -443,7 +440,7 @@ impl ChessEngine for SearchEngine {
 }
 
 // store: convert node-relative → mate-relative (absolute)
-fn score_to_tt(score: i32, ply: u32) -> i32 {
+fn score_to_tt(score: i32, ply: u8) -> i32 {
     if score >= MATE_THRESHOLD { score + ply as i32 }
     else if score <= -MATE_THRESHOLD { score - ply as i32 }
     else { score }
@@ -451,7 +448,7 @@ fn score_to_tt(score: i32, ply: u32) -> i32 {
 
 
 // probe: convert mate-relative → node-relative
-fn score_from_tt(score: i32, ply: u32) -> i32 {
+fn score_from_tt(score: i32, ply: u8) -> i32 {
     if score >= MATE_THRESHOLD { score - ply as i32 }
     else if score <= -MATE_THRESHOLD { score + ply as i32 }
     else { score }
@@ -549,9 +546,9 @@ fn has_non_pawn_material(pos: &Chess) -> bool {
 /// How many plies to shave off a late quiet move. Grows slowly (logarithmically)
 /// with both remaining depth and how late the move is, and is clamped so the
 /// reduced search still has at least one ply left.
-fn lmr_reduction(depth: u32, move_count: usize) -> u32 {
+fn lmr_reduction(depth: u8, move_count: usize) -> u8 {
     let r = 0.75 + (depth as f64).ln() * (move_count as f64).ln() / 2.25;
-    (r as u32).clamp(1, depth.saturating_sub(2))
+    (r as u8).clamp(1, depth.saturating_sub(2))
 }
 
 fn record_killer(ctx: &mut SearchContext, ply: usize, m: Move) {
@@ -563,7 +560,7 @@ fn record_killer(ctx: &mut SearchContext, ply: usize, m: Move) {
 }
 
 
-fn leaf_score(pos: &Chess, ply: u32) -> i32 {
+fn leaf_score(pos: &Chess, ply: u8) -> i32 {
     match pos.outcome().known() {
         Some(outcome) => {
             match outcome.winner() {

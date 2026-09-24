@@ -11,7 +11,7 @@ pub enum Bound {
 #[derive(Clone, Copy)]
 pub struct TtEntry {
     pub key: u64,
-    pub depth: u32,
+    pub depth: u8,
     pub score: i32,
     pub bound: Bound,
     pub best_move: Option<Move>,
@@ -58,6 +58,7 @@ pub struct Tt {
     mask: usize,
     /// Occupied slots, maintained by `store` so `hashfull` is O(1).
     filled: usize,
+    size_mb: usize,
 }
 
 impl Tt {
@@ -67,6 +68,7 @@ impl Tt {
             entries: vec![TtEntry::EMPTY; num_entries],
             mask: num_entries - 1,
             filled: 0,
+            size_mb
         }
     }
 
@@ -85,7 +87,7 @@ impl Tt {
         None
     }
 
-    pub fn store(&mut self, key: u64, depth: u32, score: i32, bound: Bound, best_move: Option<Move>) {
+    pub fn store(&mut self, key: u64, depth: u8, score: i32, bound: Bound, best_move: Option<Move>) {
         if key == 0 {
             return; // Can't be distinguished from an empty slot.
         }
@@ -112,10 +114,11 @@ impl Tt {
         self.entries = vec![TtEntry::EMPTY; num_entries];
         self.mask = num_entries - 1;
         self.filled = 0;
+        self.size_mb = size_mb;
     }
 
     pub fn fill_fraction(&self) -> f32 {
-        (self.filled as f32 / self.entries.len() as f32) as f32
+        self.filled as f32 / self.entries.len() as f32
     }
 }
 

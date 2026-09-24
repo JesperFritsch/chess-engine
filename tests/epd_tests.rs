@@ -1,11 +1,13 @@
 // tests/epd_tests.rs
-use chess_engine::engine;
+use chess_engine::engine::{self, Limits, SearchProgress, TimeMode};
+use chess_engine::engine::ChessEngine;
 use chess_engine::render;
 use shakmaty::{Chess, CastlingMode};
 use shakmaty::fen::Fen;
 use shakmaty::san::San;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 struct EpdCase {
     pos: Chess,
@@ -49,15 +51,21 @@ fn parse_epd(text: &str) -> EpdCase {
 }
 
 /// Run the engine and check its best move equals the EPD's bm.
-fn check_case(case: &EpdCase, renderer: &impl render::Renderer) {
-    let mut search_ctx = engine::SearchContext::new(16, 1000);
-    engine::time_bound_search(&mut search_ctx, &case.pos).unwrap(); // 1 second time limit
-    let pv = &search_ctx.pv;
-    let best_move = pv.first().unwrap();
-    render::render_line(&case.pos, pv, renderer);
-
+fn check_case(case: &EpdCase) {
+    let mut engine = engine::SearchEngine::new(16);
+    engine.search_handle().set_limits(
+        Limits {
+            time_mode: TimeMode::Fixed(Duration::from_secs_f64(1.0)),
+            max_depth: Some(4),
+            max_nodes: None,
+            restrict_to: None
+        }
+    );
+    engine.set_position(case.pos.clone());
+    let res = engine.search(&mut |_|{});
+    let best_move = res.best_move.unwrap();
     // Convert engine's move to SAN to compare against the EPD (which uses SAN).
-    let played_san = San::from_move(&case.pos, *best_move).to_string();
+    let played_san = San::from_move(&case.pos, best_move).to_string();
 
     assert_eq!(
         played_san, case.best_move_san,
@@ -71,7 +79,6 @@ fn check_case(case: &EpdCase, renderer: &impl render::Renderer) {
 fn run_all_epd_positions() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/positions");
     let mut ran = 0;
-    let renderer = render::TerminalRenderer;
     for entry in fs::read_dir(&dir).expect("positions dir exists") {
         let path = entry.unwrap().path();
         if path.extension().and_then(|e| e.to_str()) != Some("epd") {
@@ -79,7 +86,7 @@ fn run_all_epd_positions() {
         }
         let text = fs::read_to_string(&path).expect("readable epd file");
         let case = parse_epd(&text);
-        check_case(&case, &renderer);   // depth 4; adjust per-file later if needed
+        check_case(&case);   // depth 4; adjust per-file later if needed
         ran += 1;
     }
 
@@ -96,5 +103,5 @@ fn run_scenario() {
         .join(&file);
     let text = fs::read_to_string(&path).expect("readable epd");
     let case = parse_epd(&text);
-    check_case(&case, &render::TerminalRenderer);
+    check_case(&case);
 }

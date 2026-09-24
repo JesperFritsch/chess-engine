@@ -1,5 +1,5 @@
 use shakmaty::{Move, Chess};
-use std::time::{Duration, Instant};
+use std::time::{Duration};
 use std::sync::{
     Arc, 
     Mutex, 
@@ -9,7 +9,7 @@ use std::sync::{
         AtomicU64
     }
 };
-
+use std::fmt;
 
 pub enum Score {
     Cp(i32), // Score in centipawns
@@ -35,15 +35,15 @@ pub struct Clock {
 #[derive(Default, Clone)]
 pub struct Limits {
     pub time_mode: TimeMode,
-    pub max_depth: Option<u32>,
+    pub max_depth: Option<u8>,
     pub max_nodes: Option<u64>,
     pub restrict_to: Option<Vec<Move>>,
 }
 
 
 pub struct SearchProgress<'a> {
-    pub depth: u32, // depth in plies
-    pub seldepth: u32, // absolute max depth, even for extensions and quiescense
+    pub depth: u8, // depth in plies
+    pub seldepth: u8, // absolute max depth, even for extensions and quiescense
     pub elapsed: Duration, // time searched in ms
     pub nodes: u64,
     pub pv: &'a [Move],
@@ -57,7 +57,7 @@ pub struct SearchResult {
     pub best_move: Option<Move>,
     pub pv: Vec<Move>,
     pub score: Option<Score>,
-    pub depth: u32,
+    pub depth: u8,
     pub nodes: u64,
 }
 
@@ -73,6 +73,33 @@ pub struct SearchHandleInner {
 pub struct SearchHandle(
     Arc<SearchHandleInner>
 );
+
+
+impl Limits {
+    pub fn with_mode(&self, mode: TimeMode) -> Limits {
+        Limits {
+            time_mode: mode, ..self.clone()
+        }
+    }
+}
+
+impl fmt::Display for Score {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+       match self {
+        Score::Mate(n) => {
+            if *n > 0 {
+                write!(f, "#{n}")
+            } else {
+                write!(f, "-#{n}")
+            }
+        },
+        Score::Cp(s) => {
+            write!(f, "{:+.2}", *s as f64 / 100.0)
+        }
+    } 
+    }
+}
+
 
 impl SearchHandle {
     pub fn new(limits: Limits) -> Self{
@@ -117,7 +144,7 @@ pub trait ChessEngine {
         mv: Move
     ) -> Result<(), IllegalMove>;
 
-    fn best_move(
+    fn search(
         &mut self, 
         on_progress: &mut dyn FnMut(&SearchProgress),
     ) -> SearchResult;
@@ -125,6 +152,10 @@ pub trait ChessEngine {
     fn set_hash_size_mb(
         &mut self, 
         mb: usize,
+    );
+
+    fn clear(
+        &mut self
     );
 
     fn search_handle(

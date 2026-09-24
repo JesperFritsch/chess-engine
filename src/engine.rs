@@ -4,7 +4,6 @@ mod search;
 mod tt;
 mod interface;
 
-use shakmaty::Chess;
 pub use tt::{
     Tt,
     TtEntry,
@@ -24,7 +23,9 @@ pub use interface::{
     ChessEngine,
     Limits,
     IllegalMove,
-    Score
+    Score,
+    TimeMode,
+    Clock,
 };
 
 

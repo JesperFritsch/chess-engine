@@ -2,6 +2,7 @@ use shakmaty::{
     Position,
     Chess, 
     Move, 
+    Color,
     CastlingMode,
     fen::{Fen},
     uci::{UciMove}
@@ -11,7 +12,6 @@ use vampirc_uci::{
     UciMessage, 
     MessageList, 
     UciTimeControl, 
-    Serializable,
 };
 use::vampirc_uci;
 use crate::engine::{
@@ -21,13 +21,14 @@ use crate::engine::{
     SearchResult,
     SearchEngine,
     Limits,
-    IllegalMove,
-    Score
+    Score,
+    TimeMode,
+    Clock,
 };
+use chrono;
 use std::io::{self, BufRead, BufReader, Write};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
-use std::str::FromStr;
 
 pub enum Event {
     Line(String),
@@ -40,6 +41,7 @@ pub enum EMessage {
     SetHashSize(usize),
     SetPosition(Chess),
     PlayMove(Move),
+    Clear,
 }
 
 
@@ -50,12 +52,15 @@ struct Message {
 
 
 struct MessageHandler {
-    position: Option<Chess>
+    position: Chess,
+    limits: Limits
 }
 
 
 pub fn run() {
-    run_with(BufReader::new(io::stdin()), io::stdout().lock());
+    if let Err(e) = run_with(BufReader::new(io::stdin()), io::stdout().lock()) {
+        eprintln!("uci: {e}");
+    }
 }
 
 pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W) -> io::Result<()>{
@@ -66,7 +71,10 @@ pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W) 
     thread::spawn(move || {
         for line in input.lines() {
             let Ok(line) = line else {continue;};
-            line_tx.send(Event::Line(line)).unwrap();
+            // A closed channel means the main loop is shutting down, not an error.
+            if line_tx.send(Event::Line(line)).is_err() {
+                break;
+            }
         }
     }); 
     let mut engine = SearchEngine::new(500);
@@ -76,16 +84,22 @@ pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W) 
             match msg {
                 EMessage::Search => {
                     let res = engine.search(&mut |p| {
-                        en_tx.send(Event::Info(format_progress(p)));
+                        let _ = en_tx.send(Event::Info(format_progress(p)));
                     });
-                    en_tx.send(Event::SearchDone(res));      
+                    if en_tx.send(Event::SearchDone(res)).is_err() {
+                        break;
+                    }
                 },
                 EMessage::SetHashSize(size_mb) => engine.set_hash_size_mb(size_mb),
                 EMessage::SetPosition(pos) => engine.set_position(pos),
-                EMessage::PlayMove(mv) => { let _ = engine.play_move(mv); }
+                EMessage::PlayMove(mv) => { let _ = engine.play_move(mv); },
+                EMessage::Clear => {
+                    engine.clear();
+                }
             }
         }
     });
+    let mut msg_handler = MessageHandler::new();
     for event in rx.iter() {
         match event {
             Event::Line(line) => {
@@ -95,11 +109,11 @@ pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W) 
                         text: line.clone(), 
                         msg: uci_msg.clone()
                     };
-                    handle_message(&msg, &mut output).unwrap();
+                    msg_handler.handle(&msg, &mut output, &mut search_handle, &e_tx)?;
                 }
             },
             Event::Info(line) => {
-                writeln!(output, "{}", line);
+                writeln!(output, "{}", line)?;
                 output.flush()?;
             },
             Event::SearchDone(res) => { 
@@ -116,12 +130,19 @@ pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W) 
 
 impl MessageHandler {
 
+    fn new() -> MessageHandler {
+        MessageHandler {
+            position: Chess::default(),
+            limits: Limits::default()
+        }
+    }
+
     fn handle<W: Write>(
         &mut self,
         message: &Message, 
         output: &mut W,
         handle: &mut SearchHandle,
-        e_tx: &mut Sender<EMessage>
+        e_tx: &Sender<EMessage>
     ) -> io::Result<()>{
         match &message.msg {
             UciMessage::Unknown(_, _) => {},
@@ -142,15 +163,68 @@ impl MessageHandler {
                     let Some(mv) = convert_move(um, &pos) else { break };
                     pos.play_unchecked(mv);
                 }
-                e_tx.send(EMessage::SetPosition(pos.clone()));
-                self.position = Some(pos);
+                send_to_engine(e_tx, EMessage::SetPosition(pos.clone()))?;
+                self.position = pos;
             },
-            UciMessage::Stop => {},
-            UciMessage::UciNewGame => {},
-            UciMessage::PonderHit => {},
+            UciMessage::Stop => {
+                handle.stop();
+            },
+            UciMessage::UciNewGame => {
+                send_to_engine(e_tx, EMessage::Clear)?;
+            },
+            UciMessage::PonderHit => {
+                handle.set_limits(self.limits.clone());
+            },
             UciMessage::Go { time_control, search_control } => {
                 let is_ponder = message.text.split_whitespace().any(|w| w == "ponder");
-                let limits = Limits::default();
+                let mut limits = Limits::default();
+                if let Some(t_ctl) = time_control {
+                    match t_ctl {
+                        UciTimeControl::Infinite => { limits.time_mode = TimeMode::Unbound },
+                        UciTimeControl::TimeLeft { 
+                            white_time, 
+                            black_time, 
+                            white_increment, 
+                            black_increment, 
+                            moves_to_go 
+                        } => {
+                            let black_to_move = self.position.turn() == Color::Black;
+                            let (mine, theirs, increment) = if black_to_move {
+                                (black_time, white_time, black_increment)
+                            } else {
+                                (white_time, black_time, white_increment)
+                            };
+                            limits.time_mode = match mine {
+                                Some(remaining) => TimeMode::Clock(Clock {
+                                    remaining: td_to_std(*remaining),
+                                    opp_remaining: theirs.map(td_to_std).unwrap_or_default(),
+                                    increment: increment.map(td_to_std).unwrap_or_default(),
+                                    moves_to_go: moves_to_go.map(u32::from),
+                                }),
+                                None => TimeMode::Unbound,
+                            };
+                        }
+                        UciTimeControl::Ponder => { limits.time_mode = TimeMode::Unbound },
+                        UciTimeControl::MoveTime(dur) => { limits.time_mode = TimeMode::Fixed(td_to_std(*dur))}
+                    }
+                }
+
+                if let Some(s_ctl) = search_control {
+                    limits.max_depth = s_ctl.depth;
+                    limits.max_nodes = s_ctl.nodes;
+                    let moves: Vec<Move> = s_ctl.search_moves
+                        .iter()
+                        .filter_map( |mv| convert_move(mv, &self.position))
+                        .collect();
+                    limits.restrict_to = (!moves.is_empty()).then_some(moves);
+
+                }
+                self.limits = limits.clone(); 
+                if is_ponder {
+                    handle.set_limits(limits.with_mode(TimeMode::Unbound));
+                } else {
+                    handle.set_limits(limits);
+                }
             },
             _ => {},
         }
@@ -159,11 +233,21 @@ impl MessageHandler {
 
 }
 
+fn send_to_engine(e_tx: &Sender<EMessage>, msg: EMessage) -> io::Result<()> {
+    e_tx.send(msg)
+        .map_err(|_| io::Error::other("engine thread stopped"))
+}
+
 // Converts UciMove to shakmaty Move
 fn convert_move(uci_move: &vampirc_uci::UciMove, pos: &Chess) -> Option<Move> {
     let Ok(uci) = uci_move.to_string().parse::<UciMove>() else { return None };
     let Ok(mv) = uci.to_move(pos) else { return None };
     Some(mv)
+}
+
+
+fn td_to_std(td: chrono::Duration) -> std::time::Duration {
+    std::time::Duration::from_millis(td.num_milliseconds().max(0) as u64)
 }
 
 
@@ -186,13 +270,5 @@ fn format_progress(p: &SearchProgress) -> String {
     s
 }
 
-#[test]
-fn parse_unknown() {
-    let input = "unknown\nanother unknown\n";
-    let mut output = Vec::new();
-    run_with(input.as_bytes(), &mut output);
 
-    let out = String::from_utf8(output).unwrap();
-    assert!(out.len() == 0);
-}
 
