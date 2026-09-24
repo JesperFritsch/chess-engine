@@ -56,7 +56,7 @@ pub struct SearchProgress<'a> {
 pub struct SearchResult {
     pub best_move: Option<Move>,
     pub pv: Vec<Move>,
-    pub score: Score,
+    pub score: Option<Score>,
     pub depth: u32,
     pub nodes: u64,
 }

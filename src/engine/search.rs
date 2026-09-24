@@ -330,16 +330,16 @@ impl SearchEngine {
 
     pub fn search(
         &mut self,
-        pos: &Chess,
         on_progress: &mut dyn FnMut(&SearchProgress),
-    ) -> Option<i32> {
+    ) -> SearchResult {
         let start = Instant::now();
         let mut best_result: Option<i32> = None;
+        let pos = self.pos.clone();
         // Refresh limits
         self.search_ctx.limits = self.search_handle.with_limits(|l| l.clone());
         for depth in 1.. {
             if self.search_ctx.limits.max_depth.is_some_and(|d| depth > d) { break }
-            let result = self.depth_bound_search(pos, depth);
+            let result = self.depth_bound_search(&pos, depth);
             let Some(r) = result else { break };
             self.search_ctx.depth = depth;
             best_result = result;
@@ -358,7 +358,13 @@ impl SearchEngine {
                 break; // Stop searching deeper if a mate is found
             }
         }
-        best_result
+        SearchResult {
+            best_move: self.search_ctx.pv.first().copied(),
+            pv: self.search_ctx.pv.clone(),
+            score: best_result.map(to_score),
+            depth: self.search_ctx.depth,
+            nodes: self.search_ctx.node_count
+        }
     }
     
 
@@ -583,5 +589,9 @@ pub fn mate_in(score: i32) -> Option<i32> {
     } else {
         None
     }
+}
+
+pub fn to_score(score: i32) -> Score {
+    mate_in(score).map(Score::Mate).unwrap_or(Score::Cp(score))
 }
 

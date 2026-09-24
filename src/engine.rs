@@ -21,7 +21,10 @@ pub use interface::{
     SearchHandle,
     SearchProgress,
     SearchResult,
-    ChessEngine
+    ChessEngine,
+    Limits,
+    IllegalMove,
+    Score
 };
 
 
