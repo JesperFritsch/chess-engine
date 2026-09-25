@@ -38,17 +38,12 @@ impl TtEntry {
 /// Never shrink below this, so a tiny `Hash` value still leaves a usable table.
 const MIN_ENTRIES: usize = 1024;
 
-/// How many entries fit in `size_mb`, rounded *down* to a power of two.
-///
-/// Rounding down matters: the index is `key & mask`, which needs a power of
-/// two, and rounding up would let a requested 64 MiB allocate nearly 128 MiB —
-/// a GUI setting `Hash` expects the limit to be respected.
 fn entry_count(size_mb: usize) -> usize {
     let fits = size_mb * 1024 * 1024 / std::mem::size_of::<TtEntry>();
     let rounded = if fits.is_power_of_two() {
         fits
     } else {
-        fits.next_power_of_two() >> 1
+        fits.next_power_of_two() >> 1 
     };
     rounded.max(MIN_ENTRIES)
 }
@@ -111,6 +106,8 @@ impl Tt {
 
     pub fn resize(&mut self, size_mb: usize) {
         let num_entries = entry_count(size_mb);
+        self.entries = Vec::new(); // assign empty Vec to drop the previous one, this is to not have
+        // two big Vecs allocated at the same time.
         self.entries = vec![TtEntry::EMPTY; num_entries];
         self.mask = num_entries - 1;
         self.filled = 0;

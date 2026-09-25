@@ -12,6 +12,7 @@ use vampirc_uci::{
     UciMessage, 
     MessageList, 
     UciTimeControl, 
+    UciOptionConfig
 };
 use::vampirc_uci;
 use crate::engine::{
@@ -29,6 +30,7 @@ use chrono;
 use std::io::{self, BufRead, BufReader, Write};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
+use std::ops::ControlFlow;
 
 pub enum Event {
     Line(String),
@@ -53,7 +55,7 @@ struct Message {
 
 struct MessageHandler {
     position: Chess,
-    limits: Limits
+    limits: Option<Limits>
 }
 
 
@@ -77,7 +79,7 @@ pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W) 
             }
         }
     }); 
-    let mut engine = SearchEngine::new(500);
+    let mut engine = SearchEngine::new(16);
     let mut search_handle = engine.search_handle();
     thread::spawn(move || {
         for msg in e_rx {
@@ -100,7 +102,7 @@ pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W) 
         }
     });
     let mut msg_handler = MessageHandler::new();
-    for event in rx.iter() {
+    'main: for event in rx.iter() {
         match event {
             Event::Line(line) => {
                 let messages: MessageList = parse_with_unknown(line.as_str());
@@ -109,7 +111,10 @@ pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W) 
                         text: line.clone(), 
                         msg: uci_msg.clone()
                     };
-                    msg_handler.handle(&msg, &mut output, &mut search_handle, &e_tx)?;
+                    match msg_handler.handle(&msg, &mut output, &mut search_handle, &e_tx)? {
+                        ControlFlow::Continue(_) => {},
+                        ControlFlow::Break(_) => break 'main
+                    }
                 }
             },
             Event::Info(line) => {
@@ -118,7 +123,14 @@ pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W) 
             },
             Event::SearchDone(res) => { 
                 match res.best_move {
-                    Some(mv) => writeln!(output, "bestmove {}", mv.to_uci(CastlingMode::Standard))?,
+                    Some(mv) => {
+                        let ponder = if res.pv.len() > 1 {
+                            format!(" ponder {}", res.pv[1].to_uci(CastlingMode::Standard))
+                        } else {
+                            "".to_string()
+                        };
+                        writeln!(output, "bestmove {}{ponder}", mv.to_uci(CastlingMode::Standard))?;
+                    },
                     None => writeln!(output, "bestmove 0000")?,
                 }
                 output.flush()?;
@@ -133,7 +145,7 @@ impl MessageHandler {
     fn new() -> MessageHandler {
         MessageHandler {
             position: Chess::default(),
-            limits: Limits::default()
+            limits: Some(Limits::default())
         }
     }
 
@@ -143,20 +155,44 @@ impl MessageHandler {
         output: &mut W,
         handle: &mut SearchHandle,
         e_tx: &Sender<EMessage>
-    ) -> io::Result<()>{
+    ) -> io::Result<ControlFlow<()>>{
         match &message.msg {
             UciMessage::Unknown(_, _) => {},
+            UciMessage::Uci => {
+                writeln!(output, "{}", UciMessage::id_name("Chess-engine"))?;
+                writeln!(output, "{}", UciMessage::id_author("Jesper"))?;
+                writeln!(output, "{}", UciMessage::Option(UciOptionConfig::Spin { name: "Hash".to_string(), default: Some(16), min: Some(1), max: Some(4096) }))?;
+                writeln!(output, "{}", UciMessage::Option(UciOptionConfig::Check { name: "Ponder".to_string(), default: Some(true) }))?;
+                writeln!(output, "{}", UciMessage::UciOk)?;
+                output.flush()?;
+            },
+            UciMessage::SetOption { name, value } => {
+                match name.as_str() {
+                    "Hash" => {
+                        if let Some(value_str) = value {
+                            if let Ok(size) = value_str.trim().parse::<usize>() {
+                                send_to_engine(e_tx, EMessage::SetHashSize(size.clamp(1, 4096)))?;
+                            };
+                        } 
+                    },
+                    _ => {}
+                }
+            }
             UciMessage::IsReady => {
                 writeln!(output, "{}", UciMessage::ReadyOk)?;
                 output.flush()?;
             },
+            UciMessage::Quit => {
+                handle.stop();
+                return Ok(ControlFlow::Break(())) 
+            }
             UciMessage::Position { startpos, fen, moves } => {
                 let mut pos: Chess = if *startpos {
                     Chess::default()
                 } else {
-                    let Some(f) = fen else { return Ok(()) };
-                    let Ok(parsed) = f.as_str().parse::<Fen>() else { return Ok(()) };
-                    let Ok(p) = parsed.into_position(CastlingMode::Standard) else { return Ok(()) };
+                    let Some(f) = fen else { return Ok(ControlFlow::Continue(())) };
+                    let Ok(parsed) = f.as_str().parse::<Fen>() else { return Ok(ControlFlow::Continue(())) };
+                    let Ok(p) = parsed.into_position(CastlingMode::Standard) else { return Ok(ControlFlow::Continue(())) };
                     p
                 };
                 for um in moves {
@@ -173,7 +209,9 @@ impl MessageHandler {
                 send_to_engine(e_tx, EMessage::Clear)?;
             },
             UciMessage::PonderHit => {
-                handle.set_limits(self.limits.clone());
+                if let Some(l) = self.limits.take() {
+                    handle.set_limits(l);
+                }
             },
             UciMessage::Go { time_control, search_control } => {
                 let is_ponder = message.text.split_whitespace().any(|w| w == "ponder");
@@ -219,16 +257,18 @@ impl MessageHandler {
                     limits.restrict_to = (!moves.is_empty()).then_some(moves);
 
                 }
-                self.limits = limits.clone(); 
+                handle.reset();
+                self.limits = Some(limits.clone()); 
                 if is_ponder {
                     handle.set_limits(limits.with_mode(TimeMode::Unbound));
                 } else {
                     handle.set_limits(limits);
                 }
+                send_to_engine(e_tx, EMessage::Search)?;
             },
             _ => {},
         }
-        Ok(())
+        Ok(ControlFlow::Continue(()))
     }
 
 }

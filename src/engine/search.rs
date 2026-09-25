@@ -28,7 +28,7 @@ const CHECK_STOP_AFTER: u64 = 2000;
 // The deepest ply we keep per-ply killer slots for. Searches never get near
 // this in practice; deeper plies just fall back to the last slot.
 const MAX_PLY: usize = 128;
-
+const MAX_DEPTH: u8 = 255;
 pub struct SearchContext {
     pub depth: u8,
     pub node_count: u64,
@@ -126,10 +126,12 @@ impl SearchEngine {
             return self.quiescence(pos, alpha, beta);
         }
 
-        if self.search_ctx.node_count >= self.search_ctx.node_check_count && self.should_stop() {
+        if self.search_ctx.node_count >= self.search_ctx.node_check_count {
             self.search_ctx.node_check_count = self.search_ctx.node_count + CHECK_STOP_AFTER;
-            return None; // Time limit reached, return None to indicate search should stop
-        }
+            if self.should_stop() {
+                return None; 
+            }
+        } 
         
         let key = pos.zobrist_hash::<Zobrist64>(EnPassantMode::Legal).0;
 
@@ -388,7 +390,7 @@ impl ChessEngine for SearchEngine {
         let mut best_result: Option<i32> = None;
         let pos = self.pos.clone();
         self.reset_ctx();
-        for depth in 1.. {
+        for depth in (1..=MAX_DEPTH) {
             if self.search_ctx.limits.max_depth.is_some_and(|d| depth > d) { break }
             let result = self.depth_bound_search(&pos, depth);
             let Some(r) = result else { break };
