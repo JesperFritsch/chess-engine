@@ -128,7 +128,7 @@ impl SearchEngine {
 
         if self.search_ctx.node_count >= self.search_ctx.node_check_count {
             self.search_ctx.node_check_count = self.search_ctx.node_count + CHECK_STOP_AFTER;
-            if self.should_stop() {
+            if self.search_ctx.depth > 0 && self.should_stop() {
                 return None; 
             }
         } 
@@ -195,10 +195,13 @@ impl SearchEngine {
 
         let kply = (ply as usize).min(MAX_PLY - 1);
         let mut child_pv: Vec<Move> = Vec::new();
-        for (move_count, m) in ordered_moves(pos, hash_move, self.search_ctx.killers[kply], &self.search_ctx.history)
-            .into_iter()
-            .enumerate()
-        {
+        let mut moves = ordered_moves(pos, hash_move, self.search_ctx.killers[kply], &self.search_ctx.history);
+        if ply == 0 {
+            if let Some(restrict) = &self.search_ctx.limits.restrict_to {
+                moves.retain(|m| restrict.contains(m));
+            }
+        }
+        for (move_count, m) in moves.into_iter().enumerate() {
             let mut child = pos.clone();
             child.play_unchecked(m);
 
@@ -390,7 +393,9 @@ impl ChessEngine for SearchEngine {
         let mut best_result: Option<i32> = None;
         let pos = self.pos.clone();
         self.reset_ctx();
-        for depth in (1..=MAX_DEPTH) {
+        for depth in 1..=MAX_DEPTH {
+            // A finished game never reaches the stop check in `negamax`.
+            if pos.is_game_over() { break }
             if self.search_ctx.limits.max_depth.is_some_and(|d| depth > d) { break }
             let result = self.depth_bound_search(&pos, depth);
             let Some(r) = result else { break };
@@ -407,9 +412,13 @@ impl ChessEngine for SearchEngine {
                 hashfull: (self.tt.fill_fraction() * 1000.0) as u32
 
             });
-            if r.abs() >= MATE_THRESHOLD && !matches!(self.search_ctx.limits.time_mode, TimeMode::Unbound) {
+            if r.abs() >= MATE_THRESHOLD {
                 break; // Stop searching deeper if a mate is found
             }
+        }
+        // `go infinite`/`go ponder` may not answer before `stop` or `ponderhit`.
+        while matches!(self.search_ctx.limits.time_mode, TimeMode::Unbound) && !self.should_stop() {
+            std::thread::sleep(Duration::from_millis(2));
         }
         SearchResult {
             best_move: self.search_ctx.pv.first().copied(),
