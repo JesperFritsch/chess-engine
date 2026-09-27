@@ -30,7 +30,7 @@ fn bench_nodes_to_fixed_depth() {
             restrict_to: None
         }
     );
-    engine.set_position(pos.clone());
+    engine.set_position(pos.clone(), &[]);
     let res = engine.search(&mut |_|{});
 
     let dt = t.elapsed();

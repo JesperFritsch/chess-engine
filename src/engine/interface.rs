@@ -134,9 +134,17 @@ pub struct IllegalMove(pub Move);
 
 
 pub trait ChessEngine {
+    /// Set the position to search, given as the position a game started from
+    /// plus the moves played since.
+    ///
+    /// The moves are not a convenience: an engine handed only the final position
+    /// cannot tell which positions have already occurred, and so cannot detect a
+    /// repetition against anything that happened before it was called. Pass an
+    /// empty slice for a standalone position with no history.
     fn set_position(
-        &mut self, 
-        pos: Chess
+        &mut self,
+        start: Chess,
+        moves: &[Move],
     );
 
     fn play_move(

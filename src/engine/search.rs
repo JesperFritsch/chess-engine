@@ -23,6 +23,10 @@ const MATE_THRESHOLD: i32 =
     + piece_value(Role::Rook) * 2
     + piece_value(Role::Queen);
 
+// Score of a drawn position. Kept as a name so a contempt term (preferring a
+// slightly-worse-than-equal fight over a draw) has one place to live later.
+const DRAW: i32 = 0;
+
 const CHECK_STOP_AFTER: u64 = 2000;
 
 // The deepest ply we keep per-ply killer slots for. Searches never get near
@@ -44,6 +48,15 @@ pub struct SearchContext {
     // history[from][to]: how often a quiet move from→to has caused a cutoff,
     // anywhere in the tree. A soft, global ordering signal for quiet moves.
     history: [[i32; 64]; 64],
+    // Zobrist keys of every position on the path to the node being searched:
+    // the game so far up to the root, then one entry per move the search has
+    // made. The node's own key is deliberately *not* on the stack — `negamax`
+    // pushes it only when it recurses into a child, and pops it afterwards.
+    pos_history_keys: Vec<Zobrist64>,
+    // Index below which `pos_history_keys` must not be scanned for repetitions.
+    // Raised to the current stack height for the duration of a null-move subtree;
+    // see the null-move block in `negamax`.
+    null_floor: usize,
 }
 
 impl Default for SearchContext {
@@ -64,6 +77,8 @@ impl SearchContext {
             node_check_count: 0,
             killers: [[None; 2]; MAX_PLY],
             history: [[0; 64]; 64],
+            pos_history_keys: vec!(),
+            null_floor: 0,
         }
     }
 }
@@ -73,6 +88,10 @@ impl SearchContext {
 pub struct SearchEngine {
     tt: Tt,
     pos: Chess,
+    // Keys of every position the game has visited before `pos`, oldest first.
+    // Seeded by `set_position` and extended by `play_move`; copied into the
+    // search context as the base of the repetition stack at the start of a search.
+    pos_history_keys: Vec<Zobrist64>,
     search_handle: SearchHandle,
     search_ctx: SearchContext
 }
@@ -83,6 +102,7 @@ impl SearchEngine {
         SearchEngine { 
             tt: Tt::new(tt_mb),
             pos: Chess::default(),
+            pos_history_keys: vec!(),
             search_handle: SearchHandle::default(), 
             search_ctx: SearchContext::new()
         }
@@ -113,10 +133,38 @@ impl SearchEngine {
             return Some(leaf_score(pos, ply));
         }
 
+        // Wanted by the repetition check just below and by the TT probe further
+        // down, so it is computed once here. The hash covers the position but not
+        // the halfmove clock or move number, which is exactly what repetition
+        // detection needs: the same layout reached twice must compare equal.
+        let key = pos.zobrist_hash::<Zobrist64>(EnPassantMode::Legal);
+
+        // Draws by repetition and by the fifty-move rule. Both are properties of
+        // the *path* to this position rather than of the position itself, which is
+        // why they are settled before the transposition table is consulted and why
+        // the resulting score is never stored in it.
+        //
+        // Not at the root: the root is by definition already on its own path, and
+        // returning here would skip the move loop and leave `pv` empty — the same
+        // trap the TT cutoff below avoids at ply 0. Checkmate outranks both rules
+        // and has already been handled by `is_game_over` above.
+        if ply != 0
+            && (pos.halfmoves() >= 100
+                || is_repetition(
+                    &self.search_ctx.pos_history_keys,
+                    key,
+                    pos.halfmoves(),
+                    self.search_ctx.null_floor,
+                ))
+        {
+            return Some(DRAW);
+        }
+
         // Check extension: while in check the position is forcing and tactically
         // unresolved, so we must not evaluate it or drop into quiescence here —
-        // search one ply deeper instead. The MAX_PLY cap stops an endless checking
-        // sequence from recursing forever (we have no repetition detection yet).
+        // search one ply deeper instead. The MAX_PLY cap bounds the recursion; an
+        // endless checking sequence is now also caught by the repetition check
+        // above, which scores a perpetual as the draw it is.
         let node_in_check = pos.is_check();
         if node_in_check && (ply as usize) < MAX_PLY {
             depth += 1;
@@ -133,10 +181,8 @@ impl SearchEngine {
             }
         } 
         
-        let key = pos.zobrist_hash::<Zobrist64>(EnPassantMode::Legal).0;
-
         let mut hash_move: Option<Move> = None;
-        if let Some(e) = self.tt.probe(key) {
+        if let Some(e) = self.tt.probe(key.0) {
             // Remember the move this position was best with last time; even when the
             // stored score isn't usable for a cutoff, the move is a great first
             // guess and belongs at the front of the move list.
@@ -173,10 +219,24 @@ impl SearchEngine {
             let reduction = 2 + (depth >= 6) as u8;
             if let Ok(null_pos) = pos.clone().swap_turn() {
                 let mut null_pv = Vec::new();
+
+                // Bar the null subtree from matching positions earlier on the path.
+                // It is reached through a pass, which is not a legal move, so a line
+                // in there that "repeats" a real game position does not actually
+                // repeat anything. `swap_turn` carries the halfmove clock across
+                // unchanged, so the clock alone gives no hint that a pass happened.
+                let saved_floor = self.search_ctx.null_floor;
+                self.search_ctx.null_floor = self.search_ctx.pos_history_keys.len();
+
                 // The null child cannot null again (allow_null = false).
-                let null_score = -self.negamax(
+                let null_result = self.negamax(
                     &null_pos, depth - 1 - reduction, -beta, -beta + 1, ply + 1, &mut null_pv, false,
-                )?;
+                );
+
+                // Restored before `?` so a search that times out inside the null
+                // subtree cannot leave the barrier raised for its caller.
+                self.search_ctx.null_floor = saved_floor;
+                let null_score = -null_result?;
                 if null_score >= beta {
                     // Verify the cutoff with a real-move search (null disabled). In
                     // zugzwang the "pass" beats beta but every real move does not, so
@@ -196,11 +256,14 @@ impl SearchEngine {
         let kply = (ply as usize).min(MAX_PLY - 1);
         let mut child_pv: Vec<Move> = Vec::new();
         let mut moves = ordered_moves(pos, hash_move, self.search_ctx.killers[kply], &self.search_ctx.history);
-        if ply == 0 {
-            if let Some(restrict) = &self.search_ctx.limits.restrict_to {
-                moves.retain(|m| restrict.contains(m));
-            }
+        if ply == 0 && let Some(restrict) = &self.search_ctx.limits.restrict_to {
+            moves.retain(|m| restrict.contains(m));
         }
+        // Every child below is searched with this node on the path, so a line that
+        // comes back here has repeated it. One push covers the whole loop; the
+        // matching pop is directly after it.
+        self.search_ctx.pos_history_keys.push(key);
+
         for (move_count, m) in moves.into_iter().enumerate() {
             let mut child = pos.clone();
             child.play_unchecked(m);
@@ -270,6 +333,8 @@ impl SearchEngine {
             }
         }
 
+        self.search_ctx.pos_history_keys.pop();
+
         let bound = if best_score <= alpha_orig {
             Bound::Upper          // never raised alpha → upper bound
         } else if best_score >= beta {
@@ -277,7 +342,7 @@ impl SearchEngine {
         } else {
             Bound::Exact          // alpha < score < beta → exact
         };
-        self.tt.store(key, depth, score_to_tt(best_score, ply), bound, best_move);
+        self.tt.store(key.0, depth, score_to_tt(best_score, ply), bound, best_move);
 
         Some(best_score) 
     } 
@@ -328,6 +393,13 @@ impl SearchEngine {
         pos: &Chess,
         depth: u8
     ) -> Option<i32> {
+        // Start each iteration from the game history alone. Inside a search that
+        // runs to completion the pushes and pops in `negamax` pair up, but one that
+        // runs out of time unwinds through `?` and leaves its pushes behind, so the
+        // stack is rebuilt here rather than assumed clean.
+        self.search_ctx.pos_history_keys.clone_from(&self.pos_history_keys);
+        self.search_ctx.null_floor = 0;
+
         let mut pv = Vec::new();
         let result = self.negamax(pos, depth, -(MATE + 1), MATE + 1, 0, &mut pv, true);
         if result.is_some() {
@@ -362,16 +434,30 @@ impl SearchEngine {
         self.search_ctx.node_count = 0;
         self.search_ctx.pv.clear();
         self.search_ctx.killers = [[None; 2]; MAX_PLY];
+        self.search_ctx.pos_history_keys.clone_from(&self.pos_history_keys);
+        self.search_ctx.null_floor = 0;
     }
 
 }
 
 impl ChessEngine for SearchEngine {
     fn set_position(
-        &mut self, 
-        pos: Chess
+        &mut self,
+        start: Chess,
+        moves: &[Move],
     ) {
-        self.pos = pos
+        self.pos = start;
+        self.pos_history_keys.clear();
+        // Replaying rather than accepting a finished position is the whole point:
+        // it is the intermediate positions that repetition detection compares
+        // against. An illegal move can only come from a caller that built the list
+        // against a different starting position, so stop there and keep what is
+        // consistent instead of guessing.
+        for &mv in moves {
+            if self.play_move(mv).is_err() {
+                break;
+            }
+        }
     }
 
     fn play_move(
@@ -381,6 +467,10 @@ impl ChessEngine for SearchEngine {
         if !self.pos.is_legal(mv) {
             return Err(IllegalMove(mv));
         }
+        // The key of the position being *left*. The current position is kept off
+        // the stack so that `negamax` can own that entry: it pushes the node it is
+        // searching only when it recurses into a child.
+        self.pos_history_keys.push(self.pos.zobrist_hash(EnPassantMode::Legal));
         self.pos.play_unchecked(mv);
         Ok(())
     }
@@ -440,6 +530,8 @@ impl ChessEngine for SearchEngine {
         &mut self
     ) {
         self.tt.clear();
+        // A new game shares nothing with the old one, least of all its repetitions.
+        self.pos_history_keys.clear();
     }
 
     fn search_handle(
@@ -538,6 +630,34 @@ fn move_order_score(
         Some(from) => history[from.to_usize()][m.to().to_usize()].min(HISTORY_MAX),
         None => 0,
     }
+}
+
+/// Whether the position hashing to `key` has already occurred on the path that
+/// leads to it.
+///
+/// `keys` holds the positions before the current one, oldest first, so the slot
+/// the current position *would* take is `keys.len()`. Only every second entry can
+/// match, because a position can only recur with the same side to move.
+///
+/// `halfmoves` bounds how far back it is worth looking. Captures and pawn moves
+/// are the only irreversible moves in chess and both reset that clock, so no
+/// position older than the last one of them can ever come back. `floor` is the
+/// null-move barrier; the scan stops at whichever of the two bounds is tighter.
+///
+/// A single earlier occurrence is treated as a draw rather than waiting for a
+/// third. The side steering towards the repetition can nearly always force the
+/// third occurrence once it has the second, so insisting on it would only find
+/// the same draw two plies later and two plies deeper.
+fn is_repetition(keys: &[Zobrist64], key: Zobrist64, halfmoves: u32, floor: usize) -> bool {
+    let mut i = keys.len();
+    let limit = i.saturating_sub(halfmoves as usize).max(floor);
+    while i >= limit + 2 {
+        i -= 2;
+        if keys[i] == key {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_quiet(m: Move) -> bool {

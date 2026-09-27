@@ -61,7 +61,7 @@ fn check_case(case: &EpdCase) {
             restrict_to: None
         }
     );
-    engine.set_position(case.pos.clone());
+    engine.set_position(case.pos.clone(), &[]);
     let res = engine.search(&mut |_|{});
     let best_move = res.best_move.unwrap();
     // Convert engine's move to SAN to compare against the EPD (which uses SAN).

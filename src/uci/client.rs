@@ -41,7 +41,7 @@ pub enum Event {
 pub enum EMessage {
     Search,
     SetHashSize(usize),
-    SetPosition(Chess),
+    SetPosition(Chess, Vec<Move>),
     PlayMove(Move),
     Clear,
 }
@@ -93,7 +93,7 @@ pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W) 
                     }
                 },
                 EMessage::SetHashSize(size_mb) => engine.set_hash_size_mb(size_mb),
-                EMessage::SetPosition(pos) => engine.set_position(pos),
+                EMessage::SetPosition(start, moves) => engine.set_position(start, &moves),
                 EMessage::PlayMove(mv) => { let _ = engine.play_move(mv); },
                 EMessage::Clear => {
                     engine.clear();
@@ -169,11 +169,9 @@ impl MessageHandler {
             UciMessage::SetOption { name, value } => {
                 match name.as_str() {
                     "Hash" => {
-                        if let Some(value_str) = value {
-                            if let Ok(size) = value_str.trim().parse::<usize>() {
-                                send_to_engine(e_tx, EMessage::SetHashSize(size.clamp(1, 4096)))?;
-                            };
-                        } 
+                        if let Some(value_str) = value && let Ok(size) = value_str.trim().parse::<usize>() {
+                            send_to_engine(e_tx, EMessage::SetHashSize(size.clamp(1, 4096)))?;
+                        };
                     },
                     _ => {}
                 }
@@ -195,11 +193,17 @@ impl MessageHandler {
                     let Ok(p) = parsed.into_position(CastlingMode::Standard) else { return Ok(ControlFlow::Continue(())) };
                     p
                 };
+                // The engine needs the moves themselves, not just where they led,
+                // so that it can rebuild the positions the game has already visited
+                // and recognise a repetition of one.
+                let start = pos.clone();
+                let mut played: Vec<Move> = Vec::with_capacity(moves.len());
                 for um in moves {
                     let Some(mv) = convert_move(um, &pos) else { break };
                     pos.play_unchecked(mv);
+                    played.push(mv);
                 }
-                send_to_engine(e_tx, EMessage::SetPosition(pos.clone()))?;
+                send_to_engine(e_tx, EMessage::SetPosition(start, played))?;
                 self.position = pos;
             },
             UciMessage::Stop => {
