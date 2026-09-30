@@ -222,7 +222,7 @@ impl MessageHandler {
                 let mut limits = Limits::default();
                 if let Some(t_ctl) = time_control {
                     match t_ctl {
-                        UciTimeControl::Infinite => { limits.time_mode = TimeMode::Unbound },
+                        UciTimeControl::Infinite => { limits.time_mode = TimeMode::Infinite },
                         UciTimeControl::TimeLeft { 
                             white_time, 
                             black_time, 
@@ -246,7 +246,7 @@ impl MessageHandler {
                                 None => TimeMode::Unbound,
                             };
                         }
-                        UciTimeControl::Ponder => { limits.time_mode = TimeMode::Unbound },
+                        UciTimeControl::Ponder => { limits.time_mode = TimeMode::Infinite },
                         UciTimeControl::MoveTime(dur) => { limits.time_mode = TimeMode::Fixed(td_to_std(*dur))}
                     }
                 }
@@ -264,7 +264,7 @@ impl MessageHandler {
                 handle.reset();
                 self.limits = Some(limits.clone()); 
                 if is_ponder {
-                    handle.set_limits(limits.with_mode(TimeMode::Unbound));
+                    handle.set_limits(limits.with_mode(TimeMode::Infinite));
                 } else {
                     handle.set_limits(limits);
                 }

@@ -11,7 +11,6 @@ pub use tt::{
 
 pub use search::{
     mate_in,
-    SearchContext,
     SearchEngine
 };
 

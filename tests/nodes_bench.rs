@@ -1,8 +1,8 @@
 use chess_engine::engine;
-use chess_engine::engine::{ChessEngine, Score};
+use chess_engine::engine::{ChessEngine};
 use shakmaty::{CastlingMode, Chess};
 use shakmaty::fen::Fen;
-use std::time::{Instant, Duration};
+use std::time::{Instant};
 /// Run explicitly with:
 ///   cargo test --release --test nodes_bench -- --ignored --nocapture
 /// Used to A/B the impact of each search improvement.
@@ -17,15 +17,12 @@ fn bench_nodes_to_fixed_depth() {
         .into_position(CastlingMode::Standard)
         .unwrap();
 
-    // How deep can we get in a fixed 2-second budget? This is the metric that
-    // maps to playing strength. The 2s deadline lives in the context, so an
-    // iteration that runs out of time returns None and we stop.
     let t = Instant::now();
     let mut engine = engine::SearchEngine::new(500);
     engine.search_handle().set_limits(
         engine::Limits {
-            time_mode: engine::TimeMode::Fixed(Duration::from_secs_f64(2.0)),
-            max_depth: None,
+            time_mode: engine::TimeMode::Unbound,
+            max_depth: Some(5),
             max_nodes: None,
             restrict_to: None
         }
@@ -42,3 +39,15 @@ fn bench_nodes_to_fixed_depth() {
         dt.as_secs_f64()
     );
 }
+
+// Expected print:
+//
+// chess-engine main  ❯ cargo test --test nodes_bench -- --nocapture --ignored
+//     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+//      Running tests/nodes_bench.rs (target/debug/deps/nodes_bench-665e565de794bf36)
+//
+// running 1 test
+// in ~2s: reached depth 5, nodes=64815 score=+0.40 time=0.512s
+// test bench_nodes_to_fixed_depth ... ok
+//
+// test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s

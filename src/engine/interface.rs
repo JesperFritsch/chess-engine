@@ -17,9 +17,10 @@ pub enum Score {
 }
 
 #[derive(Default, Clone)]
-pub enum TimeMode {
+pub enum TimeMode { 
+    Unbound, // exits search if mate is found or any of the other bounds are reached.
     #[default]
-    Unbound,
+    Infinite, // never exits search unless search_handle.stop is called.
     Fixed(Duration),
     Clock(Clock)
 }
