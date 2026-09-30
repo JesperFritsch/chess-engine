@@ -10,6 +10,7 @@ pub use tt::{
 };
 
 pub use search::{
+    SearchStats,
     mate_in,
     SearchEngine
 };

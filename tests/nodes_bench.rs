@@ -18,7 +18,7 @@ fn bench_nodes_to_fixed_depth() {
         .unwrap();
 
     let t = Instant::now();
-    let mut engine = engine::SearchEngine::new(500);
+    let mut engine = engine::SearchEngine::new(500, 1);
     engine.search_handle().set_limits(
         engine::Limits {
             time_mode: engine::TimeMode::Unbound,

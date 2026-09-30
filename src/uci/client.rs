@@ -79,7 +79,7 @@ pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W) 
             }
         }
     }); 
-    let mut engine = SearchEngine::new(16);
+    let mut engine = SearchEngine::new(16, 1);
     let mut search_handle = engine.search_handle();
     thread::spawn(move || {
         for msg in e_rx {

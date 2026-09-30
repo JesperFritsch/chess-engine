@@ -52,7 +52,7 @@ fn parse_epd(text: &str) -> EpdCase {
 
 /// Run the engine and check its best move equals the EPD's bm.
 fn check_case(case: &EpdCase) {
-    let mut engine = engine::SearchEngine::new(16);
+    let mut engine = engine::SearchEngine::new(16, 1);
     engine.search_handle().set_limits(
         Limits {
             time_mode: TimeMode::Fixed(Duration::from_secs_f64(1.0)),

@@ -19,7 +19,7 @@ fn main() -> std::io::Result<()> {
         hook(info);   // now the default handler prints to a sane terminal
     }));
 
-    let mut engine = SearchEngine::new(1024);
+    let mut engine = SearchEngine::new(1024, 1);
     let handle = engine.search_handle();
     handle.set_limits(Limits::default().with_mode(TimeMode::Fixed(Duration::from_secs_f64(2.0)))); 
     let mut frontend = TuiFrontend::new()?;

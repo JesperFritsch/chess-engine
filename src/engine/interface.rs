@@ -1,3 +1,4 @@
+use super::search::SearchStats;
 use shakmaty::{Move, Chess};
 use std::time::{Duration};
 use std::sync::{
@@ -170,4 +171,7 @@ pub trait ChessEngine {
     fn search_handle(
         &self
     ) -> SearchHandle;
+
+    /// Tuning counters from the most recent search.
+    fn search_stats(&self) -> SearchStats;
 }
