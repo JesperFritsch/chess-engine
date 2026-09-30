@@ -164,6 +164,12 @@ pub trait ChessEngine {
         mb: usize,
     );
 
+    /// Set the number of search threads. Only takes effect between searches.
+    fn set_threads(
+        &mut self,
+        threads: usize,
+    );
+
     fn clear(
         &mut self
     );

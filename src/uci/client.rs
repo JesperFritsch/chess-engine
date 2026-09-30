@@ -38,9 +38,15 @@ pub enum Event {
     SearchDone(SearchResult),
 }
 
+/// Advertised ceiling for `Threads`. Deliberately not the core count: a GUI or a
+/// tournament manager sets this on purpose, and silently running fewer threads
+/// than asked would misreport what the engine is doing.
+const MAX_THREADS: usize = 256;
+
 pub enum EMessage {
     Search,
     SetHashSize(usize),
+    SetThreads(usize),
     SetPosition(Chess, Vec<Move>),
     PlayMove(Move),
     Clear,
@@ -93,6 +99,7 @@ pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W) 
                     }
                 },
                 EMessage::SetHashSize(size_mb) => engine.set_hash_size_mb(size_mb),
+                EMessage::SetThreads(threads) => engine.set_threads(threads),
                 EMessage::SetPosition(start, moves) => engine.set_position(start, &moves),
                 EMessage::PlayMove(mv) => { let _ = engine.play_move(mv); },
                 EMessage::Clear => {
@@ -162,6 +169,7 @@ impl MessageHandler {
                 writeln!(output, "{}", UciMessage::id_name("Chess-engine"))?;
                 writeln!(output, "{}", UciMessage::id_author("Jesper"))?;
                 writeln!(output, "{}", UciMessage::Option(UciOptionConfig::Spin { name: "Hash".to_string(), default: Some(16), min: Some(1), max: Some(4096) }))?;
+                writeln!(output, "{}", UciMessage::Option(UciOptionConfig::Spin { name: "Threads".to_string(), default: Some(1), min: Some(1), max: Some(MAX_THREADS as i64) }))?;
                 writeln!(output, "{}", UciMessage::Option(UciOptionConfig::Check { name: "Ponder".to_string(), default: Some(true) }))?;
                 writeln!(output, "{}", UciMessage::UciOk)?;
                 output.flush()?;
@@ -171,6 +179,11 @@ impl MessageHandler {
                     "Hash" => {
                         if let Some(value_str) = value && let Ok(size) = value_str.trim().parse::<usize>() {
                             send_to_engine(e_tx, EMessage::SetHashSize(size.clamp(1, 4096)))?;
+                        };
+                    },
+                    "Threads" => {
+                        if let Some(value_str) = value && let Ok(threads) = value_str.trim().parse::<usize>() {
+                            send_to_engine(e_tx, EMessage::SetThreads(threads.clamp(1, MAX_THREADS)))?;
                         };
                     },
                     _ => {}

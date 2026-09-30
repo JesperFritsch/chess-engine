@@ -321,7 +321,7 @@ impl SearchEngine {
     /// `tt_mb`: transposition-table size in MiB.
     pub fn new(tt_mb: usize, threads: usize) -> Self {
         let sh = SearchHandle::default();
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).stack_size(8 * 1024 * 1024).build().unwrap();
+        let pool = build_pool(threads).expect("could not start the search thread pool");
         SearchEngine { 
             tt: Tt::new(tt_mb),
             pos: Chess::default(),
@@ -434,6 +434,24 @@ impl ChessEngine for SearchEngine {
             score: best_result.map(to_score),
             depth: completed_depths,
             nodes: self.shared.nodes.load(Ordering::Relaxed),
+        }
+    }
+
+    fn set_threads(
+        &mut self,
+        threads: usize,
+    ) {
+        let threads = threads.max(1);
+        if threads == self.shared.threads {
+            return;
+        }
+        // Only ever reached between searches — the UCI engine thread handles its
+        // messages serially — so dropping the old pool cannot strand a worker.
+        // A pool that fails to start leaves the current one in place rather than
+        // taking the engine down mid-game.
+        if let Ok(pool) = build_pool(threads) {
+            self.t_pool = pool;
+            self.shared.threads = threads;
         }
     }
 
@@ -1252,6 +1270,15 @@ pub fn mate_in(score: i32) -> Option<i32> {
 
 pub fn to_score(score: i32) -> Score {
     mate_in(score).map(Score::Mate).unwrap_or(Score::Cp(score))
+}
+
+fn build_pool(threads: usize) -> Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        // Stolen jobs run on top of the stealing thread's existing stack, so depth
+        // is no longer bounded by one search's recursion alone.
+        .stack_size(8 * 1024 * 1024)
+        .build()
 }
 
 fn run_split(w: &mut Worker, sp: &SplitPoint<'_>) {
