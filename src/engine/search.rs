@@ -268,6 +268,7 @@ struct SplitPoint<'a> {
     tt: &'a Tt,
     shared: &'a Shared,
     pos: &'a Chess,
+    key: Zobrist64,
     moves: &'a [Move],
     pos_keys: &'a [Zobrist64],
     killers: &'a [[Option<Move>; 2]; MAX_PLY],
@@ -488,6 +489,7 @@ impl ChessEngine for SearchEngine {
 fn negamax(
     ctx: &mut NegaCtx<'_>,
     pos: &Chess,
+    key: Zobrist64,
     mut depth: u8,
     mut alpha: i32,
     beta: i32,
@@ -500,21 +502,17 @@ fn negamax(
     allow_null: bool,
     cancel: Option<&CancellationToken<'_>>,
 ) -> Result<i32, Abort> {
-    ctx.worker.nodes += 1;
     pv.clear(); // no continuation until a move raises alpha
 
     let mut best_score = -(MATE + 1);
     let mut best_move: Option<Move> = None;
     let alpha_orig = alpha;
-    if pos.is_game_over() {
-        return Ok(leaf_score(pos, ply));
-    }
 
     // Wanted by the repetition check just below and by the TT probe further
     // down, so it is computed once here. The hash covers the position but not
     // the halfmove clock or move number, which is exactly what repetition
     // detection needs: the same layout reached twice must compare equal.
-    let key = pos.zobrist_hash::<Zobrist64>(EnPassantMode::Legal);
+    debug_assert_eq!(key, pos.zobrist_hash::<Zobrist64>(EnPassantMode::Legal));
 
     // Draws by repetition and by the fifty-move rule. Both are properties of
     // the *path* to this position rather than of the position itself, which is
@@ -523,10 +521,11 @@ fn negamax(
     //
     // Not at the root: the root is by definition already on its own path, and
     // returning here would skip the move loop and leave `pv` empty — the same
-    // trap the TT cutoff below avoids at ply 0. Checkmate outranks both rules
-    // and has already been handled by `is_game_over` above.
+    // trap the TT cutoff below avoids at ply 0. Insufficient material is checked
+    // here too; checkmate and stalemate are found once the moves are generated.
     if ply != 0
         && (pos.halfmoves() >= 100
+            || pos.is_insufficient_material()
             || is_repetition(
                 &ctx.worker.pos_keys,
                 key,
@@ -551,6 +550,7 @@ fn negamax(
         return quiescence(ctx, pos, alpha, beta);
     }
 
+    ctx.worker.nodes += 1;
     if ctx.worker.nodes >= ctx.worker.nodes_check_count {
         ctx.worker.nodes_check_count = ctx.worker.nodes + CHECK_STOP_AFTER;
         flush_nodes(ctx.worker, ctx.shared);
@@ -614,7 +614,7 @@ fn negamax(
             // The null child cannot null again (allow_null = false).
             let ct = node_type.child_type(-beta, -beta + 1);
             let null_result = negamax(
-                ctx, &null_pos, depth - 1 - reduction, -beta, -beta + 1, ply + 1, &mut null_pv, ct, false, cancel,
+                ctx, &null_pos, null_pos.zobrist_hash(EnPassantMode::Legal), depth - 1 - reduction, -beta, -beta + 1, ply + 1, &mut null_pv, ct, false, cancel,
             );
 
             // Restored before `?` so a search that times out inside the null
@@ -628,7 +628,7 @@ fn negamax(
                 // search instead of pruning. Otherwise it confirms the cutoff.
                 let mut verify_pv = Vec::new();
                 let verify = negamax(
-                    ctx, pos, depth - reduction, beta - 1, beta, ply, &mut verify_pv, NodeType::CUT, false, cancel
+                    ctx, pos, key, depth - reduction, beta - 1, beta, ply, &mut verify_pv, NodeType::CUT, false, cancel
                 )?;
                 if verify >= beta {
                     return Ok(beta);
@@ -639,12 +639,17 @@ fn negamax(
 
     let kply = (ply as usize).min(MAX_PLY - 1);
     let mut child_pv: Vec<Move> = Vec::new();
+    // No legal moves: checkmate or stalemate. Returned before the push below.
+    let moves = pos.legal_moves();
+    if moves.is_empty() {
+        return Ok(if node_in_check { -(MATE - ply as i32) } else { DRAW });
+    }
     ctx.worker.pos_keys.push(key);
     let killers = ctx.worker.killers[kply];
     // `?` inside the loop would skip the `pop` below, so an abort is carried out
     // of the loop instead of propagating from within it.
     let mut aborted: Option<Abort> = None;
-    let mut om = OrderedMoves::new(pos, hash_move, killers, &ctx.shared.history);
+    let mut om = OrderedMoves::from_list(moves, hash_move, killers, &ctx.shared.history);
     let mut move_count = 0usize;
     let mut split_ran = false;
 
@@ -686,7 +691,7 @@ fn negamax(
                 let (tt, shared) = (ctx.tt, ctx.shared);
 
                 let sp = SplitPoint {
-                    tt, shared, pos,
+                    tt, shared, pos, key,
                     moves: &om.moves,
                     pos_keys: &path,
                     killers: &split_killers,
@@ -750,7 +755,7 @@ fn negamax(
 
         let Some(m) = om.next() else { break };
 
-        let score = match search_move(ctx, pos, move_count, m, depth, alpha, beta, ply, node_type, node_in_check, &mut child_pv, cancel) {
+        let score = match search_move(ctx, pos, key, move_count, m, depth, alpha, beta, ply, node_type, node_in_check, &mut child_pv, cancel) {
             Ok(score) => score,
             Err(abort) => { aborted = Some(abort); break; }
         };
@@ -838,7 +843,9 @@ fn quiescence(
 
     // Quiescence only looks at captures/promotions, so killer/history ordering
     // is irrelevant here — pass empty slots.
-    for m in OrderedMoves::new(pos, 0, [None, None], &ctx.shared.history).filter(|m| m.is_conversion()) {
+    let mut qui_moves = pos.capture_moves();
+    qui_moves.extend(pos.promotion_moves().into_iter().filter(|m| !m.is_capture()));
+    for m in OrderedMoves::from_list(qui_moves, 0, [None, None], &ctx.shared.history) {
         let mut child = pos.clone();
         child.play_unchecked(m);
         let score = -quiescence(ctx, &child, -beta, -alpha)?;
@@ -860,6 +867,7 @@ fn quiescence(
 fn search_move(
     ctx: &mut NegaCtx<'_>,
     pos: &Chess,
+    key: Zobrist64,
     move_count: usize,
     mv: Move,
     depth: u8,
@@ -874,12 +882,15 @@ fn search_move(
 
     let mut child = pos.clone();
     child.play_unchecked(mv);
+    // Incremental where shakmaty supports it; a full recompute otherwise.
+    let child_key = pos.update_zobrist_hash(key, mv, EnPassantMode::Legal)
+        .unwrap_or_else(|| child.zobrist_hash(EnPassantMode::Legal));
 
     if move_count == 0 {
         // Principal variation move: full window, full depth. This is the
         // move we believe is best, so we spend the most on it.
         let ct = node_type.child_type(-beta, -alpha);
-        return Ok(-negamax(ctx, &child, depth - 1, -beta, -alpha, ply + 1, child_pv, ct, true, cancel)?);
+        return Ok(-negamax(ctx, &child, child_key, depth - 1, -beta, -alpha, ply + 1, child_pv, ct, true, cancel)?);
     } else {
         // Late Move Reductions: given good ordering, quiet moves this far
         // down the list are unlikely to be best, so search them shallower
@@ -894,13 +905,13 @@ fn search_move(
 
         // Reduced-depth zero-window "scout": just asks "does this beat alpha?".
         let ct = node_type.child_type(-alpha - 1, -alpha);
-        let mut s = -negamax(ctx, &child, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1, child_pv, ct, true, cancel)?;
+        let mut s = -negamax(ctx, &child, child_key, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1, child_pv, ct, true, cancel)?;
 
         // A reduced move that beat alpha wasn't as weak as we assumed:
         // re-search it at full depth (still zero-window) for an honest verdict.
         let ct = node_type.child_type(-alpha - 1, -alpha);
         if reduction > 0 && s > alpha {
-            s = -negamax(ctx, &child, depth - 1, -alpha - 1, -alpha, ply + 1, child_pv, ct, true, cancel)?;
+            s = -negamax(ctx, &child, child_key, depth - 1, -alpha - 1, -alpha, ply + 1, child_pv, ct, true, cancel)?;
         }
 
         // PVS: any move that beats alpha inside the window may be a new
@@ -908,7 +919,7 @@ fn search_move(
         // exact score and PV.
         let ct = node_type.child_type(-beta, -alpha);
         if s > alpha && s < beta {
-            s = -negamax(ctx, &child, depth - 1, -beta, -alpha, ply + 1, child_pv, ct, true, cancel)?;
+            s = -negamax(ctx, &child, child_key, depth - 1, -beta, -alpha, ply + 1, child_pv, ct, true, cancel)?;
         }
         Ok(s)
     }
@@ -948,7 +959,7 @@ fn search_root(
 
 
     if let Some(m) = om.next() {
-        match search_move(ctx, pos, 0, m, depth, alpha, beta, 0, NodeType::PV, node_in_check, &mut child_pv, None) {
+        match search_move(ctx, pos, key, 0, m, depth, alpha, beta, 0, NodeType::PV, node_in_check, &mut child_pv, None) {
             Ok(score) => {
                 best_score = score;
                 best_move = Some(m);
@@ -978,7 +989,7 @@ fn search_root(
         let (tt, shared) = (ctx.tt, ctx.shared);
 
         let sp = SplitPoint {
-            tt, shared, pos,
+            tt, shared, pos, key,
             moves: &om.moves,
             pos_keys: &path,
             killers: &killers,
@@ -1308,7 +1319,7 @@ fn run_split(w: &mut Worker, sp: &SplitPoint<'_>) {
 
         let nodes_before = ctx.worker.nodes;
         let result = search_move(
-            &mut ctx, sp.pos, move_count, m, sp.depth,
+            &mut ctx, sp.pos, sp.key, move_count, m, sp.depth,
             alpha, sp.beta, sp.ply, sp.node_type, sp.node_in_check, &mut child_pv, Some(&token)
         );
         if sp.state.load(Ordering::Relaxed) != RUNNING {

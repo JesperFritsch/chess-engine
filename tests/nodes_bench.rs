@@ -17,17 +17,17 @@ fn bench_nodes_to_fixed_depth() {
         .into_position(CastlingMode::Standard)
         .unwrap();
 
-    let t = Instant::now();
     let mut engine = engine::SearchEngine::new(500, 1);
     engine.search_handle().set_limits(
         engine::Limits {
             time_mode: engine::TimeMode::Unbound,
-            max_depth: Some(5),
+            max_depth: Some(15),
             max_nodes: None,
             restrict_to: None
         }
     );
     engine.set_position(pos.clone(), &[]);
+    let t = Instant::now();
     let res = engine.search(&mut |_|{});
 
     let dt = t.elapsed();
