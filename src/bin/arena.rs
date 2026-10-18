@@ -6,20 +6,10 @@
 //! opening helps both sides equally. Results are from the first evaluator's
 //! point of view.
 
-use chess_engine::arena::{self, GameConfig, GameResult, Job, Rng, Termination};
-use chess_engine::engine::{ChessEngine, Limits, MaterialEval, PstEval, SearchEngine, TimeMode};
+use chess_engine::arena::{self, make_engine, GameConfig, GameResult, Job, Rng, Termination, EVALUATORS};
+use chess_engine::engine::{Limits, TimeMode};
 use std::collections::BTreeMap;
 use std::process::exit;
-
-const EVALUATORS: &[&str] = &["pst", "material"];
-
-fn make_engine(name: &str, hash_mb: usize) -> Box<dyn ChessEngine> {
-    match name {
-        "pst" => Box::new(SearchEngine::with_evaluator(PstEval, hash_mb, 1)),
-        "material" => Box::new(SearchEngine::with_evaluator(MaterialEval, hash_mb, 1)),
-        _ => unreachable!("checked in main"),
-    }
-}
 
 struct Args {
     a: String,
@@ -30,6 +20,7 @@ struct Args {
     opening_plies: usize,
     seed: u64,
     hash_mb: usize,
+    json: Option<String>,
 }
 
 fn main() {
@@ -48,11 +39,8 @@ fn main() {
     let mut rng = Rng::new(args.seed);
     let jobs: Vec<Job> = (0..args.games / 2)
         .flat_map(|_| {
-            let opening = arena::random_opening(&mut rng, args.opening_plies);
-            [
-                Job { opening: opening.clone(), first_is_white: true },
-                Job { opening, first_is_white: false },
-            ]
+            let seed = rng.next_u64();
+            [Job { seed, first_is_white: true }, Job { seed, first_is_white: false }]
         })
         .collect();
 
@@ -70,7 +58,10 @@ fn main() {
         &jobs,
         args.concurrency,
         &config,
-        || (make_engine(&args.a, args.hash_mb), make_engine(&args.b, args.hash_mb)),
+        || (make_engine(&args.a, args.hash_mb).unwrap(), make_engine(&args.b, args.hash_mb).unwrap()),
+        // Purely random: an opening built with one side's engine would differ
+        // between the two games of a pair whenever the engines differ.
+        |rng, _| arena::random_opening(rng, args.opening_plies),
         |i, job, record| {
             let a_color = if job.first_is_white { shakmaty::Color::White } else { shakmaty::Color::Black };
             let s = record.result.score_for(a_color);
@@ -98,6 +89,18 @@ fn main() {
     println!("  endings:");
     for (name, count) in &terminations {
         println!("    {name:<24} {count}");
+    }
+
+    // A machine-readable summary, for scripts such as nnue/loop.py.
+    if let Some(path) = &args.json {
+        let json = format!(
+            "{{\"a\": {:?}, \"b\": {:?}, \"games\": {n}, \"wins\": {w}, \"draws\": {d}, \"losses\": {l}, \"elo\": {elo:.2}, \"margin\": {}}}\n",
+            args.a, args.b, if margin.is_finite() { format!("{margin:.2}") } else { "null".into() }
+        );
+        std::fs::write(path, json).unwrap_or_else(|e| {
+            eprintln!("cannot write {path}: {e}");
+            exit(1)
+        });
     }
 }
 
@@ -144,7 +147,7 @@ fn parse_args() -> Args {
     let usage = || -> ! {
         eprintln!(
             "usage: arena <eval-a> <eval-b> [--games N] [--nodes N] [--concurrency N] \
-             [--opening-plies N] [--seed N] [--hash MB]\nevaluators: {}",
+             [--opening-plies N] [--seed N] [--hash MB] [--json FILE]\nevaluators: {}",
             EVALUATORS.join(", ")
         );
         exit(2)
@@ -158,6 +161,7 @@ fn parse_args() -> Args {
         opening_plies: 8,
         seed: 1,
         hash_mb: 16,
+        json: None,
     };
     let mut positional = Vec::new();
     let mut it = std::env::args().skip(1);
@@ -170,14 +174,19 @@ fn parse_args() -> Args {
             "--opening-plies" => args.opening_plies = value(),
             "--seed" => args.seed = value() as u64,
             "--hash" => args.hash_mb = value(),
+            "--json" => args.json = Some(it.next().unwrap_or_else(|| usage())),
             "-h" | "--help" => usage(),
             _ if arg.starts_with("--") => usage(),
             _ => positional.push(arg),
         }
     }
     let [a, b] = positional.try_into().unwrap_or_else(|_| usage());
-    if !EVALUATORS.contains(&a.as_str()) || !EVALUATORS.contains(&b.as_str()) {
-        usage();
+    // Fails early, with a message, on an unknown name or an unreadable net.
+    for name in [&a, &b] {
+        if let Err(e) = make_engine(name, 1) {
+            eprintln!("{e}");
+            exit(2)
+        }
     }
     if args.games < 2 {
         usage();

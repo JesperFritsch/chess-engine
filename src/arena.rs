@@ -6,11 +6,27 @@
 //! many in parallel and hands each finished [`GameRecord`] to a callback. A
 //! match tallies the results; data generation writes the positions to disk.
 
-use crate::engine::{ChessEngine, Limits, Score, SearchResult};
+use crate::engine::{nnue, ChessEngine, Limits, MaterialEval, PstEval, Score, SearchEngine, SearchResult};
 use shakmaty::zobrist::Zobrist64;
 use shakmaty::{Chess, Color, EnPassantMode, Move, Position};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
+
+/// Names accepted by [`make_engine`], for usage messages.
+pub const EVALUATORS: &[&str] = &["pst", "material", "nnue:<net file>"];
+
+/// A single-threaded engine searching with the evaluator called `name`:
+/// `pst`, `material`, or `nnue:<path>` for a net exported by `nnue/train.py`.
+pub fn make_engine(name: &str, hash_mb: usize) -> Result<Box<dyn ChessEngine>, String> {
+    Ok(match name {
+        "pst" => Box::new(SearchEngine::with_evaluator(PstEval, hash_mb, 1)),
+        "material" => Box::new(SearchEngine::with_evaluator(MaterialEval, hash_mb, 1)),
+        _ => match name.strip_prefix("nnue:") {
+            Some(path) => Box::new(SearchEngine::with_evaluator(nnue::load_evaluator(path)?, hash_mb, 1)),
+            None => return Err(format!("unknown evaluator {name:?}; known: {}", EVALUATORS.join(", "))),
+        },
+    })
+}
 
 /// A mate score in centipawns, for adjudication and for training labels.
 /// Anything this large or larger means "won", whatever the distance to mate.
@@ -258,11 +274,78 @@ pub fn random_opening(rng: &mut Rng, plies: usize) -> Opening {
     }
 }
 
-/// One game for [`run_games`]: the opening, and which of the two engines a
-/// thread holds plays White.
+/// How [`mixed_opening`] builds an opening.
+#[derive(Clone)]
+pub struct OpeningConfig {
+    /// Every `random_every`-th ply is random; the rest are the engine's.
+    pub random_every: usize,
+    /// Random plies per opening: `random_plies` or one more, chosen per game.
+    pub random_plies: usize,
+    /// Discard an opening the engine scores beyond ±`max_score` centipawns.
+    pub max_score: i32,
+}
+
+impl Default for OpeningConfig {
+    fn default() -> Self {
+        OpeningConfig { random_every: 3, random_plies: 8, max_score: 400 }
+    }
+}
+
+/// An opening where every `random_every`-th ply is a uniformly random legal
+/// move and the rest are the engine's: with 3, plies 1-2 are the engine's,
+/// ply 3 is random, and so on, ending on the last random ply.
+///
+/// The random moves make every game different; the engine moves in between
+/// keep the position closer to something real play would reach.
+///
+/// Two things keep the result fair. The side that moves right after the last
+/// random ply is the first to exploit it and wins noticeably more often, so the
+/// number of random plies is `random_plies` or one more, chosen at random,
+/// which hands that first move to White and Black equally often. And an
+/// opening the engine already scores beyond ±`max_score` is thrown away: a game
+/// decided by a random blunder teaches little.
+///
+/// Retries with new random moves until both hold and the game is still going.
+pub fn mixed_opening(rng: &mut Rng, engine: &mut dyn ChessEngine, limits: &Limits, config: &OpeningConfig) -> Opening {
+    let random_every = config.random_every.max(1);
+    engine.clear();
+    engine.search_handle().set_limits(limits.clone());
+    'retry: loop {
+        let total = random_every * (config.random_plies + rng.below(2));
+        let mut pos = Chess::default();
+        let mut moves = Vec::with_capacity(total);
+        for ply in 0..total {
+            let legal = pos.legal_moves();
+            if legal.is_empty() {
+                continue 'retry;
+            }
+            let m = if (ply + 1) % random_every == 0 {
+                legal[rng.below(legal.len())]
+            } else {
+                engine.set_position(Chess::default(), &moves);
+                engine.search(&mut |_| {}).best_move.expect("position has legal moves")
+            };
+            pos.play_unchecked(m);
+            moves.push(m);
+        }
+        if pos.legal_moves().is_empty() {
+            continue;
+        }
+        engine.set_position(Chess::default(), &moves);
+        let balanced = engine.search(&mut |_| {}).score.is_some_and(|s| score_to_cp(&s).abs() <= config.max_score);
+        if !balanced {
+            continue;
+        }
+        return Opening { start: Chess::default(), moves };
+    }
+}
+
+/// One game for [`run_games`].
 #[derive(Clone)]
 pub struct Job {
-    pub opening: Opening,
+    /// Seeds the opening. Jobs with the same seed get the same opening, which is
+    /// how a match plays each opening twice with colors swapped.
+    pub seed: u64,
     /// `true`: the first engine from `make_engines` plays White.
     pub first_is_white: bool,
 }
@@ -270,33 +353,39 @@ pub struct Job {
 /// Play `jobs` on `concurrency` threads.
 ///
 /// Every thread calls `make_engines` once and reuses the pair for all its games,
-/// so engines are built per thread and never shared. `on_game` runs on the
+/// so engines are built per thread and never shared. The opening is built on
+/// the worker too, by `make_opening`, which gets a fresh [`Rng`] from the job's
+/// seed and the thread's first engine, so openings that need searching are
+/// built in parallel like the games themselves. `on_game` runs on the
 /// calling thread, in completion order, with the job's index; it can therefore
 /// write files or print without any locking.
-pub fn run_games<M>(
+pub fn run_games<M, O>(
     jobs: &[Job],
     concurrency: usize,
     config: &GameConfig,
     make_engines: M,
+    make_opening: O,
     mut on_game: impl FnMut(usize, &Job, GameRecord),
 ) where
     M: Fn() -> (Box<dyn ChessEngine>, Box<dyn ChessEngine>) + Sync,
+    O: Fn(&mut Rng, &mut dyn ChessEngine) -> Opening + Sync,
 {
     let next = AtomicUsize::new(0);
     let (tx, rx) = mpsc::channel();
     std::thread::scope(|scope| {
         for _ in 0..concurrency.max(1) {
             let tx = tx.clone();
-            let (next, make_engines) = (&next, &make_engines);
+            let (next, make_engines, make_opening) = (&next, &make_engines, &make_opening);
             scope.spawn(move || {
                 let (mut first, mut second) = make_engines();
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(job) = jobs.get(i) else { break };
+                    let opening = make_opening(&mut Rng::new(job.seed), first.as_mut());
                     let record = if job.first_is_white {
-                        play_game(first.as_mut(), second.as_mut(), &job.opening, config)
+                        play_game(first.as_mut(), second.as_mut(), &opening, config)
                     } else {
-                        play_game(second.as_mut(), first.as_mut(), &job.opening, config)
+                        play_game(second.as_mut(), first.as_mut(), &opening, config)
                     };
                     if tx.send((i, record)).is_err() {
                         break;

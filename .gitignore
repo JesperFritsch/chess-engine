@@ -1,1 +1,6 @@
 /target
+
+# NNUE training
+nnue/.venv/
+__pycache__/
+runs/

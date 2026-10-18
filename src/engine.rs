@@ -1,6 +1,7 @@
 
 mod eval;
 mod evaluator;
+pub mod nnue;
 mod search;
 mod tt;
 mod interface;

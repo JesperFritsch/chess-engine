@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 ///
 /// Run explicitly with:
 ///   cargo test --release --test eval_bench -- --ignored --nocapture
-/// Search depth defaults to 10; override with `BENCH_DEPTH=12`.
+/// Search depth defaults to 10; override with `BENCH_DEPTH=12`. Set
+/// `NNUE_NET=path/to/net.bin` to include a trained net.
 ///
 /// Every evaluator searches the same positions to the same fixed depth, on one
 /// thread, with a fresh hash table per position, so the runs are independent
@@ -23,10 +24,14 @@ fn bench_evaluators() {
     let positions: Vec<(&str, Chess)> = POSITIONS.iter().map(|(name, fen)| (*name, parse(fen))).collect();
 
     // Add new evaluators here.
-    let runs = vec![
+    let mut runs = vec![
         run("pst", PstEval, &positions, depth),
         run("material", MaterialEval, &positions, depth),
     ];
+    // NNUE_NET=nets/net.bin adds the net to the comparison.
+    if let Ok(path) = std::env::var("NNUE_NET") {
+        runs.push(run("nnue", engine::nnue::load_evaluator(&path).unwrap(), &positions, depth));
+    }
 
     println!("\ndepth {depth}, {} positions, 1 thread\n", positions.len());
     println!("{:<10} {:>14} {:>10} {:>10}", "evaluator", "total nodes", "time", "knps");
