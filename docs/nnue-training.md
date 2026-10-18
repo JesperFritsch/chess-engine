@@ -663,8 +663,21 @@ target/release/chess-engine material
 ```
 
 A name that is neither known nor a readable net exits with status 2 and the
-usage line. The TUI checks it *before* taking over the terminal, so the error
+usage line. The TUI resolves it *before* taking over the terminal, so the error
 is readable.
+
+The TUI also takes `--threads` (default: the core count) and `--hash` MB
+(default 1024):
+
+```sh
+target/release/chess-engine runs/first/nets/gen_007.bin --threads 4 --hash 128
+```
+
+**A big hash is not automatically better.** 1024 MB means nearly every probe is
+a DRAM access and a TLB miss, and on a machine with a small cache that costs
+more than the extra entries are worth: the same net benches at 1,423 knps with
+the 16 MB table `eval_bench` uses and around 600 in a game with 1024 MB. Worth
+measuring per machine, with `--hash` or the `Hash` UCI option.
 
 ---
 

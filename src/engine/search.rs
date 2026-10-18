@@ -439,14 +439,16 @@ impl<E: Evaluator> ChessEngine for SearchEngine<E> {
             best_result = Some(result);
             completed_depths = depth;
             root_pv = pv.clone();
+            let nodes = self.shared.nodes.load(Ordering::Relaxed);
+            let elapsed = start.elapsed();
             on_progress(&SearchProgress {
                 depth,
                 seldepth: depth,
                 score: mate_in(result).map(Score::Mate).unwrap_or(Score::Cp(result)),
-                nodes: self.shared.nodes.load(Ordering::Relaxed),
+                nodes,
                 pv: &pv,
-                elapsed: start.elapsed(),
-                nodes_per_s: 0,
+                elapsed,
+                nodes_per_s: nodes_per_s(nodes, elapsed),
                 hashfull: (self.tt.fill_fraction() * 1000.0) as u32
 
             });
@@ -1253,6 +1255,20 @@ fn is_repetition(keys: &[Zobrist64], key: Zobrist64, halfmoves: u32, floor: usiz
         }
     }
     false
+}
+
+/// Average nodes per second over a whole search, for `SearchProgress`.
+///
+/// Both arguments count from the start of the search, so this is the average
+/// rather than the rate of the last iteration. The first iteration can finish
+/// in well under a microsecond, hence the zero check; the clamp keeps an
+/// absurdly fast one from wrapping the `u32` the UCI protocol wants.
+fn nodes_per_s(nodes: u64, elapsed: std::time::Duration) -> u32 {
+    let secs = elapsed.as_secs_f64();
+    if secs <= 0.0 {
+        return 0;
+    }
+    (nodes as f64 / secs).min(u32::MAX as f64) as u32
 }
 
 fn is_quiet(m: Move) -> bool {
