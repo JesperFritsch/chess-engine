@@ -405,13 +405,34 @@ problem.
 python nnue/check.py nets/net.pt nets/net.bin data.txt
 ```
 
-Evaluates 2,000 positions with the float net in PyTorch and with the engine's
-integer implementation (`evalfen`), and compares them. They can't agree
-exactly, because of the rounded weights; a few centipawns is that rounding.
-Tens or hundreds mean the two implementations disagree about the network (a
-feature indexed differently, a view flipped the wrong way, a constant out of
-step), and the engine would be playing a different net than the one trained.
-It fails (exit code 1) above a mean difference of 5 cp (`--max-mean-diff`).
+Evaluates 2,000 positions three ways: with the float net in PyTorch (from the
+checkpoint), with the exported net read back and **dequantized**
+(`train.load_exported`: the integers in the `.bin` divided by `QA`/`QB`, i.e.
+the weights the engine actually holds, as floats), and with the engine itself
+(`evalfen`). That gives two differences, which answer two different questions:
+
+* **engine vs dequantized** is the correctness test, and what the script passes
+  or fails on. Both sides hold identical weights, so they can differ only by
+  the engine's final integer division: about 0.5 cp, never more than 1.
+  Anything larger means the two implementations disagree about the network
+  itself (a feature indexed differently, a view flipped the wrong way, a
+  constant out of step), and the engine would be playing a different net than
+  the one trained. It fails (exit code 1) above a mean of 1.5 cp
+  (`--max-mean-diff`).
+* **float vs dequantized** is the **quantization loss**: what rounding the
+  weights to integers costs. Reported for information only; it is not a bug and
+  has no correct value. It scales with the size of the evaluations, so it grows
+  as the net gets stronger — about 2 cp on a freshly initialized net, 8 cp on
+  one trained to an average |eval| of 400 cp.
+
+Comparing float against the engine directly, as this script first did, measures
+both at once and can do neither job. On a weak net every evaluation is near
+zero, so *any* two networks agree to within a couple of centipawns and a real
+mismatch passes unnoticed; on a trained net the honest quantization loss trips
+a threshold meant for implementation bugs. Measured on generation 1 of the
+first run: engine vs dequantized 0.49 cp, while deliberately swapping the
+output halves, leaving Black's view unflipped, or dropping the colour offset
+from the feature index land at 834, 210 and 4,961 cp respectively.
 
 ### `loop.py`: the training loop
 
@@ -503,9 +524,10 @@ nnue/.venv/bin/python nnue/loop.py --run smoke --generations 2 \
 nnue/.venv/bin/python nnue/loop.py --run smoke --report
 ```
 
-Expect the check step to report a mean difference of a few cp, and the nets
-to be weak (300 games is very little data). The point is that nothing
-crashes. Delete `runs/smoke/` afterwards.
+Expect the check step to report about 0.5 cp engine vs dequantized, and the
+nets to be weak (300 games is very little data) — they will lose every game to
+PST, which at two gradient steps is correct behaviour, not a failure. The point
+is that nothing crashes. Delete `runs/smoke/` afterwards.
 
 ### The real run
 

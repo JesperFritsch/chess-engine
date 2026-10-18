@@ -28,6 +28,7 @@ on the command line when resuming override the saved ones from then on.
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -99,7 +100,11 @@ def run_cmd(cmd, logfile):
     """Run a command, showing its output live and keeping a copy in `logfile`."""
     with open(logfile, "wb") as log:
         log.write(("$ " + " ".join(str(c) for c in cmd) + "\n").encode())
-        proc = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=ROOT)
+        # Unbuffered: Python block-buffers stdout when it is a pipe, which would
+        # hold a whole training run's progress back until the process exits.
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        proc = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                cwd=ROOT, env=env)
         try:
             while chunk := proc.stdout.read1(4096):
                 sys.stdout.buffer.write(chunk)
@@ -181,7 +186,8 @@ def step_check(run, cfg, state, g):
         if summary.exists():
             c = json.loads(summary.read_text())
             state["record"]["check"] = c
-            run.log(f"gen {g}  check: engine vs PyTorch mean diff {c['mean_diff']:.2f} cp, max {c['max_diff']:.1f} cp"
+            run.log(f"gen {g}  check: engine vs net {c['mean_diff']:.2f} cp (max {c['max_diff']:.1f}), "
+                    f"quantization loss {c['quant_mean']:.1f} cp"
                     + ("" if c["ok"] else "  MISMATCH"))
 
 

@@ -120,6 +120,49 @@ def export(net, path):
         f.write(struct.pack("<i", int(round(out_b * QA * QB))))
 
 
+def load_exported(path):
+    """The net as the *engine* holds it: the .bin read back, its integers turned
+    into floats again.
+
+    These are the exact weights the engine computes with, so a PyTorch forward
+    pass over them differs from the engine's only by its final integer division
+    (at most 1 cp). Comparing against this separates the two questions
+    `check.py` has to answer: whether the two implementations agree about the
+    network at all, and what the rounding to integers costs.
+    """
+    raw = Path(path).read_bytes()
+    magic = raw[:4]
+    version, hidden = struct.unpack("<II", raw[4:12])
+    if magic != b"NNUE" or version != 1 or hidden != HIDDEN:
+        raise ValueError(f"{path}: not a version-1 net with {HIDDEN} hidden "
+                         f"(got {magic!r}, version {version}, hidden {hidden})")
+    off = 12
+
+    def take(count):
+        nonlocal off
+        a = np.frombuffer(raw, "<i2", count, off)
+        off += count * 2
+        return a.astype(np.float32)
+
+    ft_w = take(FEATURES * HIDDEN).reshape(FEATURES, HIDDEN)
+    ft_b = take(HIDDEN)
+    out_w = take(2 * HIDDEN)
+    (out_b,) = struct.unpack("<i", raw[off:off + 4])
+    off += 4
+    if off != len(raw):
+        raise ValueError(f"{path}: {len(raw)} bytes, expected {off}")
+
+    net = Net()
+    with torch.no_grad():
+        net.ft.weight[:FEATURES] = torch.from_numpy(ft_w / QA)
+        net.ft.weight[NO_FEATURE].zero_()
+        net.ft_bias.copy_(torch.from_numpy(ft_b / QA))
+        net.out.weight[0] = torch.from_numpy(out_w / QB)
+        net.out.bias.fill_(out_b / (QA * QB))
+    net.eval()
+    return net
+
+
 class Dataset:
     """Several record files used as one: the training part of each, plus a
     held-out tail of each for validation.
@@ -215,7 +258,7 @@ def main():
     total_steps = steps_per_epoch * args.epochs
     n_val = sum(len(v) for v in data.val)
     print(f"{len(data)} training / {n_val} validation positions from {len(args.data)} file(s), "
-          f"{steps_per_epoch} steps per epoch, device {device}")
+          f"{steps_per_epoch} steps per epoch, device {device}", flush=True)
 
     net = Net().to(device)
     if args.init:
@@ -251,6 +294,14 @@ def main():
             net.clip()
             total += loss.item()
 
+            # Progress within the epoch: an epoch over several generations of
+            # data takes a while, and loop.py pipes this output, so without a
+            # line now and then there is no way to tell training from a hang.
+            if step % 20 == 0 or step + 1 == steps_per_epoch:
+                rate = (step + 1) * args.batch_size / (time.time() - t0)
+                print(f"\repoch {epoch + 1}/{args.epochs}  step {step + 1}/{steps_per_epoch}  "
+                      f"train {total / (step + 1):.5f}  {rate:,.0f} pos/s   ", end="", flush=True)
+
         net.eval()
         with torch.no_grad():
             us, them, target = val_batch
@@ -264,8 +315,9 @@ def main():
             "pos_per_s": steps_per_epoch * args.batch_size / secs,
         }
         print(
-            f"epoch {epoch + 1}/{args.epochs}  train {stats['train_loss']:.5f}  val {val_loss:.5f}  "
-            f"lr {stats['lr']:.2e}  {stats['pos_per_s']:,.0f} pos/s"
+            f"\repoch {epoch + 1}/{args.epochs}  train {stats['train_loss']:.5f}  val {val_loss:.5f}  "
+            f"lr {stats['lr']:.2e}  {stats['pos_per_s']:,.0f} pos/s        ",
+            flush=True,
         )
         if args.log:
             with open(args.log, "a") as f:
@@ -276,7 +328,7 @@ def main():
         )
         export(net, out)
 
-    print(f"wrote {out} (and checkpoint {out.with_suffix('.pt')})")
+    print(f"wrote {out} (and checkpoint {out.with_suffix('.pt')})", flush=True)
 
 
 if __name__ == "__main__":
