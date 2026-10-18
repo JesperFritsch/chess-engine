@@ -349,9 +349,20 @@ impl<E: Evaluator> SearchEngine<E> {
                 shared.threads = threads;
                 shared
             },
-            search_handle: sh, 
+            search_handle: sh,
         }
-    } 
+    }
+
+    /// Search with `evaluator` from now on.
+    ///
+    /// Only safe between searches, like [`set_threads`](ChessEngine::set_threads):
+    /// the UCI engine thread handles its messages serially, so a search is never
+    /// in flight here. The transposition table is cleared, because every score
+    /// in it was produced by the evaluator being replaced.
+    pub fn set_evaluator(&mut self, evaluator: E) {
+        self.evaluator = evaluator;
+        self.tt.clear();
+    }
 }
 
 

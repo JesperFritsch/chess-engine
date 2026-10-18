@@ -75,27 +75,39 @@ def flip(features):
     color, rest = features // 384, features % 384
     role, square = rest // 64, rest % 64
     flipped = (1 - color) * 384 + role * 64 + (square ^ 56)
-    return np.where(pad, NO_FEATURE, flipped)
+    return flipped.masked_fill_(pad, NO_FEATURE)
 
 
 def batch(records, lam, device):
-    """Inputs and targets for a batch, from the side to move's point of view."""
-    white = records["features"].astype(np.int64)
+    """Inputs and targets for a batch, from the side to move's point of view.
+
+    The records cross to `device` as they sit in the file -- 16-bit features,
+    16-bit score, 8-bit result and side to move -- and the flip, the
+    side-to-move swap and the target are all computed there.
+
+    Doing that work in numpy on the way was what held training back: it is
+    elementwise, so it ran on one core while the GPU waited, and widening the
+    features to int64 first made the copy four times larger than it needed to
+    be.
+    """
+    up = lambda a: torch.from_numpy(a).to(device, non_blocking=True)
+    # torch has no uint16; every feature is <= 768, so the same bits read as
+    # int16 are the same number.
+    white = up(records["features"].astype(np.int16)).long()
+    stm_black = up(np.ascontiguousarray(records["stm"])).bool()
+    score = up(np.ascontiguousarray(records["score"])).float()
+    result = up(np.ascontiguousarray(records["result"])).float() / 2  # 0, 0.5, 1 for White
+
     black = flip(white)
-    stm_black = (records["stm"] == 1)[:, None]
-    us = np.where(stm_black, black, white)
-    them = np.where(stm_black, white, black)
+    mask = stm_black[:, None]
+    us = torch.where(mask, black, white)
+    them = torch.where(mask, white, black)
 
-    sign = np.where(records["stm"] == 1, -1.0, 1.0)
-    score = records["score"].astype(np.float32) * sign
-    result = records["result"].astype(np.float32) / 2  # 0, 0.5, 1 for White
-    result = np.where(records["stm"] == 1, 1 - result, result)
-
+    score = torch.where(stm_black, -score, score)
+    result = torch.where(stm_black, 1 - result, result)
     # Blend of what the search said and what happened in the game.
-    target = lam / (1 + np.exp(-score / SCALE)) + (1 - lam) * result
-
-    t = lambda a, dtype: torch.from_numpy(np.ascontiguousarray(a)).to(device=device, dtype=dtype)
-    return t(us, torch.long), t(them, torch.long), t(target, torch.float32)
+    target = lam * torch.sigmoid(score / SCALE) + (1 - lam) * result
+    return us, them, target
 
 
 def export(net, path):
@@ -279,7 +291,11 @@ def main():
 
     for epoch in range(start_epoch, args.epochs):
         net.train()
-        t0, total = time.time(), 0.0
+        t0 = time.time()
+        # Summed on the GPU: reading it back every step (`.item()`) would block
+        # until the kernels finish, so the CPU could never run ahead and queue
+        # the next batch's work.
+        total = torch.zeros((), device=device)
         # A fresh shuffle every epoch; each position is seen once per epoch.
         order = rng.permutation(len(data))
         for step in range(steps_per_epoch):
@@ -292,15 +308,17 @@ def main():
             opt.step()
             sched.step()
             net.clip()
-            total += loss.item()
+            total += loss.detach()
 
             # Progress within the epoch: an epoch over several generations of
             # data takes a while, and loop.py pipes this output, so without a
             # line now and then there is no way to tell training from a hang.
+            # This is also the only place the loss is read back, once every 20
+            # steps instead of every one.
             if step % 20 == 0 or step + 1 == steps_per_epoch:
                 rate = (step + 1) * args.batch_size / (time.time() - t0)
                 print(f"\repoch {epoch + 1}/{args.epochs}  step {step + 1}/{steps_per_epoch}  "
-                      f"train {total / (step + 1):.5f}  {rate:,.0f} pos/s   ", end="", flush=True)
+                      f"train {total.item() / (step + 1):.5f}  {rate:,.0f} pos/s   ", end="", flush=True)
 
         net.eval()
         with torch.no_grad():
@@ -309,7 +327,7 @@ def main():
         secs = time.time() - t0
         stats = {
             "epoch": epoch + 1,
-            "train_loss": total / steps_per_epoch,
+            "train_loss": total.item() / steps_per_epoch,
             "val_loss": val_loss,
             "lr": sched.get_last_lr()[0],
             "pos_per_s": steps_per_epoch * args.batch_size / secs,

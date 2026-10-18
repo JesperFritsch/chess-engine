@@ -7,7 +7,9 @@ mod tt;
 mod interface;
 
 pub use evaluator::{
+    AnyEval,
     Evaluator,
+    EVALUATORS,
     MaterialEval,
     PstEval,
 };

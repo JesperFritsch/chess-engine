@@ -603,13 +603,77 @@ nnue/.venv/bin/python nnue/train.py runs/first/data/gen_00{1,2,3,4}.bin --out ne
 
 ---
 
-## 9. Not done yet
+## 9. Playing with a net (`AnyEval`)
 
-* **The UCI engine and the TUI still play with PST.** A trained net is only
-  used by `arena`, `datagen`, `evalfen` and the bench. Using it in real games
-  needs a UCI option (the usual name is `EvalFile`) or a net embedded in the
-  binary with `include_bytes!`. Because `SearchEngine` is generic, the UCI
-  client has to choose the evaluator type when it creates the engine.
+`arena` and `datagen` pick their evaluator by name, but they do it once, at
+startup, and build a `SearchEngine<PstEval>` or a `SearchEngine<NnueEval>`
+accordingly. The UCI engine cannot: a GUI sets `EvalFile` whenever it likes,
+and `SearchEngine<E>` fixes `E` when the binary is compiled.
+
+`AnyEval` (`engine/evaluator.rs`) is the answer -- an enum over the three
+evaluators that is itself an `Evaluator`, dispatching with a `match` in each
+hook. That costs one branch per call rather than the indirect call a
+`dyn Evaluator` would need, and it is confined to the interactive binaries:
+`make_engine` still builds `SearchEngine` over the *concrete* type, so self-play
+and matches search exactly as they always have.
+
+Two spellings parse an evaluator:
+
+* `AnyEval::parse` is strict -- `pst`, `material` or `nnue:<path>` -- and is
+  what `make_engine` uses, where a typo should be an error.
+* `AnyEval::parse_setting` is forgiving, for a value a person or a GUI typed:
+  empty (or the literal `<empty>` some GUIs send) and `none` mean PST, and
+  anything that is not a known name is taken to be a path to a net.
+
+### The UCI option
+
+```
+setoption name EvalFile value runs/first/nets/gen_007.bin
+setoption name EvalFile value nnue:nets/net.bin   # the explicit spelling
+setoption name EvalFile value material            # the other evaluators
+setoption name EvalFile value                     # back to PST
+```
+
+The net is read on the UCI thread, on the way in, so a bad path is answered
+with `info string EvalFile: <the error>` and **the evaluator in use is left
+alone** -- a GUI that mistypes a path keeps playing with the previous one
+instead of the engine dying mid-game. A successful change reports
+`info string EvalFile: now using nnue`, and clears the transposition table,
+because every score in it came from the evaluator being replaced.
+
+For lichess-bot, in `config.yml`:
+
+```yaml
+engine:
+  uci_options:
+    EvalFile: /path/to/chess-engine/runs/first/nets/gen_007.bin
+    Threads: 4
+    Hash: 256
+```
+
+### On the command line
+
+Both interactive binaries take an evaluator as their first argument, which only
+sets the one to *start* with (`EvalFile` can still replace it later):
+
+```sh
+target/release/uci-engine runs/first/nets/gen_007.bin
+target/release/chess-engine runs/first/nets/gen_007.bin   # the TUI
+target/release/chess-engine material
+```
+
+A name that is neither known nor a readable net exits with status 2 and the
+usage line. The TUI checks it *before* taking over the terminal, so the error
+is readable.
+
+---
+
+## 10. Not done yet
+
+* **A net is not embedded in the binary.** The UCI engine and the TUI can
+  both play with one (§10), but the file has to be there to be loaded.
+  `include_bytes!` would make a single self-contained binary, which is what a
+  release wants.
 * **Batch preparation in `train.py` runs in numpy on the CPU.** On a fast GPU it
   will be the bottleneck. It can be moved onto the GPU if needed.
 * **Bigger nets and more inputs.** King-bucketed inputs (HalfKP/HalfKA),

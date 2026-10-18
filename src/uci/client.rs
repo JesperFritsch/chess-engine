@@ -16,6 +16,7 @@ use vampirc_uci::{
 };
 use::vampirc_uci;
 use crate::engine::{
+    AnyEval,
     ChessEngine, 
     SearchHandle,
     SearchProgress, 
@@ -47,6 +48,7 @@ pub enum EMessage {
     Search,
     SetHashSize(usize),
     SetThreads(usize),
+    SetEval(AnyEval),
     SetPosition(Chess, Vec<Move>),
     PlayMove(Move),
     Clear,
@@ -66,12 +68,18 @@ struct MessageHandler {
 
 
 pub fn run() {
-    if let Err(e) = run_with(BufReader::new(io::stdin()), io::stdout().lock()) {
+    run_with_eval(AnyEval::default())
+}
+
+/// Start with `eval` already selected, for a command-line argument. The
+/// `EvalFile` option can still replace it later.
+pub fn run_with_eval(eval: AnyEval) {
+    if let Err(e) = run_with(BufReader::new(io::stdin()), io::stdout().lock(), eval) {
         eprintln!("uci: {e}");
     }
 }
 
-pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W) -> io::Result<()>{
+pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W, eval: AnyEval) -> io::Result<()>{
     let (tx, rx) = mpsc::channel::<Event>();
     let (e_tx, e_rx) = mpsc::channel::<EMessage>();
     let line_tx: Sender<Event> = tx.clone();
@@ -85,7 +93,7 @@ pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W) 
             }
         }
     }); 
-    let mut engine = SearchEngine::new(16, 1);
+    let mut engine = SearchEngine::with_evaluator(eval, 16, 1);
     let mut search_handle = engine.search_handle();
     thread::spawn(move || {
         for msg in e_rx {
@@ -100,6 +108,7 @@ pub fn run_with<R: BufRead + Send + 'static, W: Write>(input: R, mut output: W) 
                 },
                 EMessage::SetHashSize(size_mb) => engine.set_hash_size_mb(size_mb),
                 EMessage::SetThreads(threads) => engine.set_threads(threads),
+                EMessage::SetEval(eval) => engine.set_evaluator(eval),
                 EMessage::SetPosition(start, moves) => engine.set_position(start, &moves),
                 EMessage::PlayMove(mv) => { let _ = engine.play_move(mv); },
                 EMessage::Clear => {
@@ -171,6 +180,7 @@ impl MessageHandler {
                 writeln!(output, "{}", UciMessage::Option(UciOptionConfig::Spin { name: "Hash".to_string(), default: Some(16), min: Some(1), max: Some(4096) }))?;
                 writeln!(output, "{}", UciMessage::Option(UciOptionConfig::Spin { name: "Threads".to_string(), default: Some(1), min: Some(1), max: Some(MAX_THREADS as i64) }))?;
                 writeln!(output, "{}", UciMessage::Option(UciOptionConfig::Check { name: "Ponder".to_string(), default: Some(true) }))?;
+                writeln!(output, "{}", UciMessage::Option(UciOptionConfig::String { name: "EvalFile".to_string(), default: Some(String::new()) }))?;
                 writeln!(output, "{}", UciMessage::UciOk)?;
                 output.flush()?;
             },
@@ -185,6 +195,25 @@ impl MessageHandler {
                         if let Some(value_str) = value && let Ok(threads) = value_str.trim().parse::<usize>() {
                             send_to_engine(e_tx, EMessage::SetThreads(threads.clamp(1, MAX_THREADS)))?;
                         };
+                    },
+                    // The net is read here, on the way in, so that a bad path is
+                    // reported to the caller instead of reaching the engine
+                    // thread, which has no way to answer. The evaluator in use
+                    // is left alone when it fails: a GUI that mistypes a path
+                    // keeps playing with the previous one rather than dying.
+                    "EvalFile" => {
+                        let value = value.as_deref().unwrap_or("");
+                        match AnyEval::parse_setting(value) {
+                            Ok(eval) => {
+                                writeln!(output, "info string EvalFile: now using {}", eval.name())?;
+                                output.flush()?;
+                                send_to_engine(e_tx, EMessage::SetEval(eval))?;
+                            }
+                            Err(e) => {
+                                writeln!(output, "info string EvalFile: {e}")?;
+                                output.flush()?;
+                            }
+                        }
                     },
                     _ => {}
                 }

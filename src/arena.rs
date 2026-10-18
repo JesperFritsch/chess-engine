@@ -6,25 +6,26 @@
 //! many in parallel and hands each finished [`GameRecord`] to a callback. A
 //! match tallies the results; data generation writes the positions to disk.
 
-use crate::engine::{nnue, ChessEngine, Limits, MaterialEval, PstEval, Score, SearchEngine, SearchResult};
+use crate::engine::{AnyEval, ChessEngine, Limits, Score, SearchEngine, SearchResult};
 use shakmaty::zobrist::Zobrist64;
 use shakmaty::{Chess, Color, EnPassantMode, Move, Position};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 
 /// Names accepted by [`make_engine`], for usage messages.
-pub const EVALUATORS: &[&str] = &["pst", "material", "nnue:<net file>"];
+pub use crate::engine::EVALUATORS;
 
 /// A single-threaded engine searching with the evaluator called `name`:
 /// `pst`, `material`, or `nnue:<path>` for a net exported by `nnue/train.py`.
+///
+/// Each arm builds a `SearchEngine` over the *concrete* evaluator, so the
+/// search is monomorphized and the eval call inlined, as it has always been
+/// here. [`AnyEval`] only does the parsing; it never reaches the search.
 pub fn make_engine(name: &str, hash_mb: usize) -> Result<Box<dyn ChessEngine>, String> {
-    Ok(match name {
-        "pst" => Box::new(SearchEngine::with_evaluator(PstEval, hash_mb, 1)),
-        "material" => Box::new(SearchEngine::with_evaluator(MaterialEval, hash_mb, 1)),
-        _ => match name.strip_prefix("nnue:") {
-            Some(path) => Box::new(SearchEngine::with_evaluator(nnue::load_evaluator(path)?, hash_mb, 1)),
-            None => return Err(format!("unknown evaluator {name:?}; known: {}", EVALUATORS.join(", "))),
-        },
+    Ok(match AnyEval::parse(name)? {
+        AnyEval::Pst(e) => Box::new(SearchEngine::with_evaluator(e, hash_mb, 1)),
+        AnyEval::Material(e) => Box::new(SearchEngine::with_evaluator(e, hash_mb, 1)),
+        AnyEval::Nnue(e) => Box::new(SearchEngine::with_evaluator(e, hash_mb, 1)),
     })
 }
 

@@ -1,6 +1,11 @@
 use shakmaty::{Chess, Color, Move, Position, Role};
 
 use super::eval;
+use super::nnue::{self, NnueEval};
+
+/// The evaluator names accepted on a command line and by the `EvalFile` UCI
+/// option, for usage and error messages.
+pub const EVALUATORS: &[&str] = &["pst", "material", "nnue:<net file>"];
 
 /// A static evaluation the search can be built on.
 ///
@@ -66,5 +71,109 @@ impl Evaluator for MaterialEval {
             score += eval::piece_value(role) * (white - black);
         }
         if pos.turn() == Color::White { score } else { -score }
+    }
+}
+
+/// Any of the engine's evaluators, picked at run time.
+///
+/// [`SearchEngine`](crate::engine::SearchEngine) is generic over its evaluator
+/// so that the eval call can be inlined, which fixes the choice when the
+/// binary is compiled. The UCI engine and the TUI cannot work that way: which
+/// evaluator to use arrives as an option or an argument, long after
+/// compilation. This enum is the one place that pays for the flexibility, and
+/// it pays in a branch per call rather than in the indirect call a
+/// `dyn Evaluator` would cost. `arena` and `datagen` keep using the concrete
+/// types, so nothing about self-play or matches changes.
+#[derive(Clone)]
+pub enum AnyEval {
+    Pst(PstEval),
+    Material(MaterialEval),
+    Nnue(NnueEval),
+}
+
+impl Default for AnyEval {
+    fn default() -> Self {
+        AnyEval::Pst(PstEval)
+    }
+}
+
+impl AnyEval {
+    /// Exactly one of `pst`, `material` or `nnue:<path>`. This is the spelling
+    /// the tools take, where a typo should be an error rather than a guess.
+    pub fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "pst" => Ok(AnyEval::Pst(PstEval)),
+            "material" => Ok(AnyEval::Material(MaterialEval)),
+            _ => match name.strip_prefix("nnue:") {
+                Some(path) => Ok(AnyEval::Nnue(nnue::load_evaluator(path)?)),
+                None => Err(format!(
+                    "unknown evaluator {name:?}; known: {}",
+                    EVALUATORS.join(", ")
+                )),
+            },
+        }
+    }
+
+    /// As [`AnyEval::parse`], but for a value a person or a GUI supplied, where
+    /// being forgiving is worth more than catching typos:
+    ///
+    /// * empty (some GUIs send the literal `<empty>`) or `none` means the
+    ///   built-in evaluation, so clearing the option goes back to PST;
+    /// * anything that is not a known name is taken to be the path to a net,
+    ///   so `EvalFile` can be set to a plain file name as it is in other
+    ///   engines.
+    pub fn parse_setting(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "" | "<empty>" | "none" => Ok(AnyEval::default()),
+            name @ ("pst" | "material") => Self::parse(name),
+            name if name.starts_with("nnue:") => Self::parse(name),
+            path => Ok(AnyEval::Nnue(nnue::load_evaluator(path)?)),
+        }
+    }
+
+    /// Which evaluator this is, for `info string` and the usage text.
+    pub fn name(&self) -> &'static str {
+        match self {
+            AnyEval::Pst(_) => "pst",
+            AnyEval::Material(_) => "material",
+            AnyEval::Nnue(_) => "nnue",
+        }
+    }
+}
+
+impl Evaluator for AnyEval {
+    fn reset(&mut self, pos: &Chess, ply: usize) {
+        match self {
+            AnyEval::Pst(e) => e.reset(pos, ply),
+            AnyEval::Material(e) => e.reset(pos, ply),
+            AnyEval::Nnue(e) => e.reset(pos, ply),
+        }
+    }
+
+    #[inline]
+    fn on_move(&mut self, ply: usize, parent: &Chess, mv: Move) {
+        match self {
+            AnyEval::Pst(e) => e.on_move(ply, parent, mv),
+            AnyEval::Material(e) => e.on_move(ply, parent, mv),
+            AnyEval::Nnue(e) => e.on_move(ply, parent, mv),
+        }
+    }
+
+    #[inline]
+    fn on_null_move(&mut self, ply: usize) {
+        match self {
+            AnyEval::Pst(e) => e.on_null_move(ply),
+            AnyEval::Material(e) => e.on_null_move(ply),
+            AnyEval::Nnue(e) => e.on_null_move(ply),
+        }
+    }
+
+    #[inline]
+    fn evaluate(&mut self, pos: &Chess, ply: usize) -> i32 {
+        match self {
+            AnyEval::Pst(e) => e.evaluate(pos, ply),
+            AnyEval::Material(e) => e.evaluate(pos, ply),
+            AnyEval::Nnue(e) => e.evaluate(pos, ply),
+        }
     }
 }
