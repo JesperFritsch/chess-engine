@@ -12,6 +12,7 @@ use std::sync::{
 };
 use std::fmt;
 
+#[derive(Clone, Copy, Debug)]
 pub enum Score {
     Cp(i32), // Score in centipawns
     Mate(i32), // mate in x moves, negative if getting mated

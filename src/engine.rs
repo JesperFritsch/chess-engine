@@ -1,8 +1,15 @@
 
 mod eval;
+mod evaluator;
 mod search;
 mod tt;
 mod interface;
+
+pub use evaluator::{
+    Evaluator,
+    MaterialEval,
+    PstEval,
+};
 
 pub use tt::{
     Tt,

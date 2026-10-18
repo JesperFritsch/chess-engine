@@ -3,7 +3,8 @@ use shakmaty::zobrist::Zobrist64;
 use shakmaty::{Chess, EnPassantMode, Move, Position, Role, MoveList};
 
 
-use super::eval::{evaluate, piece_value};
+use super::eval::piece_value;
+use super::evaluator::{Evaluator, PstEval};
 use super::tt::{Tt, Bound, PackedMove, pack_move};
 use super::interface::{ChessEngine, 
     SearchHandle,
@@ -230,7 +231,8 @@ impl Shared {
 
 }
 
-struct Worker {
+struct Worker<E> {
+    eval: E,
     killers: [[Option<Move>; 2]; MAX_PLY],
     pos_keys: Vec<Zobrist64>,
     null_floor: usize,
@@ -239,9 +241,10 @@ struct Worker {
     nodes_check_count: u64,
 }
 
-impl Worker {
-    fn new() -> Worker {
+impl<E: Evaluator> Worker<E> {
+    fn new(eval: E) -> Worker<E> {
         Worker {
+            eval,
             killers: [[None; 2]; MAX_PLY],
             pos_keys: Vec::new(),
             null_floor: 0,
@@ -264,9 +267,11 @@ const RUNNING:  u8 = 0;
 const CUTOFF:   u8 = 1;
 const STOPPED:  u8 = 2;
 
-struct SplitPoint<'a> {
+struct SplitPoint<'a, E> {
     tt: &'a Tt,
     shared: &'a Shared,
+    // Untouched evaluator that helpers clone and `reset` at the split position.
+    proto: &'a E,
     pos: &'a Chess,
     key: Zobrist64,
     moves: &'a [Move],
@@ -286,9 +291,10 @@ struct SplitPoint<'a> {
     best: Mutex<Best>,
 }
 
-struct NegaCtx<'a> {
+struct NegaCtx<'a, E> {
     tt: &'a Tt,
-    worker: &'a mut Worker,
+    worker: &'a mut Worker<E>,
+    proto: &'a E,
     shared: &'a Shared, 
 }
 
@@ -306,7 +312,9 @@ impl CancellationToken<'_> {
 }
 
 /// The project's search engine, adapted to [`ChessEngine`].
-pub struct SearchEngine {
+pub struct SearchEngine<E: Evaluator = PstEval> {
+    // Never searched with directly: each search thread works on a clone.
+    evaluator: E,
     tt: Tt,
     shared: Shared,
     pos: Chess,
@@ -318,12 +326,20 @@ pub struct SearchEngine {
     search_handle: SearchHandle,
 }
 
-impl SearchEngine {
+impl SearchEngine<PstEval> {
     /// `tt_mb`: transposition-table size in MiB.
     pub fn new(tt_mb: usize, threads: usize) -> Self {
+        Self::with_evaluator(PstEval, tt_mb, threads)
+    }
+}
+
+impl<E: Evaluator> SearchEngine<E> {
+    /// Like [`SearchEngine::new`], but searching with `evaluator`.
+    pub fn with_evaluator(evaluator: E, tt_mb: usize, threads: usize) -> Self {
         let sh = SearchHandle::default();
         let pool = build_pool(threads).expect("could not start the search thread pool");
         SearchEngine { 
+            evaluator,
             tt: Tt::new(tt_mb),
             pos: Chess::default(),
             pos_history_keys: vec!(),
@@ -339,7 +355,7 @@ impl SearchEngine {
 }
 
 
-impl ChessEngine for SearchEngine {
+impl<E: Evaluator> ChessEngine for SearchEngine<E> {
     fn set_position(
         &mut self,
         start: Chess,
@@ -381,7 +397,8 @@ impl ChessEngine for SearchEngine {
         let start = Instant::now();
         let mut best_result: Option<i32> = None;
         let pos = self.pos.clone();
-        let mut w = Worker::new();
+        let mut w = Worker::new(self.evaluator.clone());
+        w.eval.reset(&pos, 0);
         let mut root_pv = Vec::new();
         let mut completed_depths = 0;
         self.shared.begin(&self.pos_history_keys);
@@ -401,6 +418,7 @@ impl ChessEngine for SearchEngine {
                 worker: &mut w,
                 tt:     &self.tt,
                 shared: &self.shared,
+                proto:  &self.evaluator,
             };
 
             let mut pv = Vec::new();
@@ -486,8 +504,8 @@ impl ChessEngine for SearchEngine {
 
 
 #[allow(clippy::too_many_arguments)]
-fn negamax(
-    ctx: &mut NegaCtx<'_>,
+fn negamax<E: Evaluator>(
+    ctx: &mut NegaCtx<'_, E>,
     pos: &Chess,
     key: Zobrist64,
     mut depth: u8,
@@ -547,7 +565,7 @@ fn negamax(
     }
 
     if depth == 0 {
-        return quiescence(ctx, pos, alpha, beta);
+        return quiescence(ctx, pos, alpha, beta, ply);
     }
 
     ctx.worker.nodes += 1;
@@ -613,6 +631,7 @@ fn negamax(
 
             // The null child cannot null again (allow_null = false).
             let ct = node_type.child_type(-beta, -beta + 1);
+            ctx.worker.eval.on_null_move(ply as usize);
             let null_result = negamax(
                 ctx, &null_pos, null_pos.zobrist_hash(EnPassantMode::Legal), depth - 1 - reduction, -beta, -beta + 1, ply + 1, &mut null_pv, ct, false, cancel,
             );
@@ -691,7 +710,7 @@ fn negamax(
                 let (tt, shared) = (ctx.tt, ctx.shared);
 
                 let sp = SplitPoint {
-                    tt, shared, pos, key,
+                    tt, shared, pos, key, proto: ctx.proto,
                     moves: &om.moves,
                     pos_keys: &path,
                     killers: &split_killers,
@@ -718,7 +737,8 @@ fn negamax(
                     for _ in 0..helpers {
                         scope.spawn(move |_| {
                             let started = Instant::now();
-                            let mut helper = Worker::new();
+                            let mut helper = Worker::new(sp_ref.proto.clone());
+                            helper.eval.reset(sp_ref.pos, sp_ref.ply as usize);
                             run_split(&mut helper, sp_ref);
                             sp_ref.shared.helper_nanos
                                 .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -824,15 +844,16 @@ fn negamax(
 
 
 
-fn quiescence(
-    ctx: &mut NegaCtx,
+fn quiescence<E: Evaluator>(
+    ctx: &mut NegaCtx<'_, E>,
     pos: &Chess, 
     mut alpha: i32, 
     beta: i32, 
+    ply: u8,
 ) -> Result<i32, Abort> {
     ctx.worker.nodes += 1;
     
-    let stand_pat = evaluate(pos);
+    let stand_pat = ctx.worker.eval.evaluate(pos, ply as usize);
     if stand_pat >= beta {
         return Ok(stand_pat);
     }
@@ -848,7 +869,8 @@ fn quiescence(
     for m in OrderedMoves::from_list(qui_moves, 0, [None, None], &ctx.shared.history) {
         let mut child = pos.clone();
         child.play_unchecked(m);
-        let score = -quiescence(ctx, &child, -beta, -alpha)?;
+        ctx.worker.eval.on_move(ply as usize, pos, m);
+        let score = -quiescence(ctx, &child, -beta, -alpha, ply + 1)?;
         if score > best_score {
             best_score = score;
         }
@@ -864,8 +886,8 @@ fn quiescence(
     Ok(best_score)
 }
 
-fn search_move(
-    ctx: &mut NegaCtx<'_>,
+fn search_move<E: Evaluator>(
+    ctx: &mut NegaCtx<'_, E>,
     pos: &Chess,
     key: Zobrist64,
     move_count: usize,
@@ -882,6 +904,7 @@ fn search_move(
 
     let mut child = pos.clone();
     child.play_unchecked(mv);
+    ctx.worker.eval.on_move(ply as usize, pos, mv);
     // Incremental where shakmaty supports it; a full recompute otherwise.
     let child_key = pos.update_zobrist_hash(key, mv, EnPassantMode::Legal)
         .unwrap_or_else(|| child.zobrist_hash(EnPassantMode::Legal));
@@ -925,8 +948,8 @@ fn search_move(
     }
 }
 
-fn search_root(
-    ctx: &mut NegaCtx,
+fn search_root<E: Evaluator>(
+    ctx: &mut NegaCtx<'_, E>,
     pos: &Chess,
     mut depth: u8,
     root_moves: MoveList,
@@ -934,7 +957,7 @@ fn search_root(
 ) -> Result<i32, Abort> {
     ctx.worker.nodes += 1;
     pv.clear();
-    if pos.is_game_over() { return Ok(leaf_score(pos, 0)) };
+    if pos.is_game_over() { return Ok(leaf_score(&mut ctx.worker.eval, pos, 0)) };
 
     let key = pos.zobrist_hash::<Zobrist64>(EnPassantMode::Legal);
     let node_in_check = pos.is_check();
@@ -989,7 +1012,7 @@ fn search_root(
         let (tt, shared) = (ctx.tt, ctx.shared);
 
         let sp = SplitPoint {
-            tt, shared, pos, key,
+            tt, shared, pos, key, proto: ctx.proto,
             moves: &om.moves,
             pos_keys: &path,
             killers: &killers,
@@ -1021,7 +1044,8 @@ fn search_root(
             for _ in 0..helpers {
                 scope.spawn(move |_| {
                     let started = Instant::now();
-                    let mut helper = Worker::new();
+                    let mut helper = Worker::new(sp_ref.proto.clone());
+                    helper.eval.reset(sp_ref.pos, sp_ref.ply as usize);
                     run_split(&mut helper, sp_ref);
                     sp_ref.shared.helper_nanos
                         .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -1052,7 +1076,7 @@ fn search_root(
     Ok(best_score)
 }
 
-fn flush_nodes(w: &mut Worker, s: &Shared) {
+fn flush_nodes<E>(w: &mut Worker<E>, s: &Shared) {
     s.nodes.fetch_add(w.nodes - w.nodes_flushed, Ordering::Relaxed);
     w.nodes_flushed = w.nodes;
 }
@@ -1242,7 +1266,7 @@ fn lmr_reduction(depth: u8, move_count: usize) -> u8 {
     (r as u8).clamp(1, depth.saturating_sub(2))
 }
 
-fn record_killer(ctx: &mut Worker, ply: usize, m: Move) {
+fn record_killer<E>(ctx: &mut Worker<E>, ply: usize, m: Move) {
     // Keep two distinct killers, most-recent first.
     if ctx.killers[ply][0] != Some(m) {
         ctx.killers[ply][1] = ctx.killers[ply][0];
@@ -1251,7 +1275,7 @@ fn record_killer(ctx: &mut Worker, ply: usize, m: Move) {
 }
 
 
-fn leaf_score(pos: &Chess, ply: u8) -> i32 {
+fn leaf_score<E: Evaluator>(eval: &mut E, pos: &Chess, ply: u8) -> i32 {
     match pos.outcome().known() {
         Some(outcome) => {
             match outcome.winner() {
@@ -1262,7 +1286,7 @@ fn leaf_score(pos: &Chess, ply: u8) -> i32 {
                 None => 0, // Draw
             }
         }
-        None => evaluate(pos),
+        None => eval.evaluate(pos, ply as usize),
     }
 }
 
@@ -1292,7 +1316,7 @@ fn build_pool(threads: usize) -> Result<rayon::ThreadPool, rayon::ThreadPoolBuil
         .build()
 }
 
-fn run_split(w: &mut Worker, sp: &SplitPoint<'_>) {
+fn run_split<E: Evaluator>(w: &mut Worker<E>, sp: &SplitPoint<'_, E>) {
     w.pos_keys.clear();
     w.pos_keys.extend_from_slice(sp.pos_keys);
     w.null_floor = sp.null_floor;
@@ -1301,7 +1325,7 @@ fn run_split(w: &mut Worker, sp: &SplitPoint<'_>) {
     sp.shared.busy.fetch_add(1, Ordering::Relaxed);
 
     let mut child_pv: Vec<Move> = Vec::new();
-    let mut ctx = NegaCtx { worker: w, tt: sp.tt, shared: sp.shared };
+    let mut ctx = NegaCtx { worker: w, tt: sp.tt, shared: sp.shared, proto: sp.proto };
 
     let token = CancellationToken{ status: &sp.state, parent: sp.parent_token};
     while sp.state.load(Ordering::Relaxed) == RUNNING {
