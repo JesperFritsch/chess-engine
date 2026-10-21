@@ -1,4 +1,3 @@
-use crossterm::style::Attribute::NoHidden;
 use shakmaty::zobrist::Zobrist64;
 use shakmaty::{Chess, EnPassantMode, Move, Position, Role, MoveList};
 
@@ -20,7 +19,6 @@ use::std::sync::atomic::{
     AtomicI32,
     AtomicU64,
     AtomicUsize,
-    AtomicBool,
     Ordering
 };
 use::std::sync::Mutex;
@@ -39,6 +37,14 @@ const MATE_THRESHOLD: i32 =
 // Score of a drawn position. Kept as a name so a contempt term (preferring a
 // slightly-worse-than-equal fight over a draw) has one place to live later.
 const DRAW: i32 = 0;
+
+// From this halfmove clock on, decisive TT scores are no longer trusted for
+// cutoffs: the fifty-move draw is close enough that a win or loss stored
+// without it is likely wrong.
+const TT_CUTOFF_HALFMOVE_LIMIT: u32 = 90;
+// Stored scores beyond this many centipawns count as decisive. The fifty-move
+// draw only pulls scores towards zero, so scores within it stay close to right.
+const TT_CUTOFF_DECISIVE_SCORE: i32 = 200;
 
 const CHECK_STOP_AFTER: u64 = 2000;
 
@@ -605,9 +611,19 @@ fn negamax<E: Evaluator>(
         // loop that fills `pv`, which at ply 0 would leave us with an empty PV
         // and therefore no move to play. At the root we always search so a real
         // principal variation is produced.
-        if ply != 0 && e.depth >= depth {
+        //
+        // Not in PV nodes either: the main line is always searched, so its PV
+        // and score are real rather than whatever an older search left behind.
+        //
+        // And not for a decisive score close to the fifty-move rule: the hash
+        // ignores the halfmove clock, so a win stored when the clock was lower
+        // knows nothing of a draw that is now only a few plies away. Scores
+        // near zero are still used, since that draw would hardly change them.
+        if ply != 0 && node_type != NodeType::PV && e.depth >= depth {
             let score = e.score as i32;
-            let usable = match e.bound {
+            let stale = pos.halfmoves() >= TT_CUTOFF_HALFMOVE_LIMIT
+                && score.abs() > TT_CUTOFF_DECISIVE_SCORE;
+            let usable = !stale && match e.bound {
                 Bound::Exact => true,
                 Bound::Lower => score >= beta,
                 Bound::Upper => score <= alpha,
@@ -776,7 +792,6 @@ fn negamax<E: Evaluator>(
                 let best = sp.best.into_inner().unwrap();
                 best_score = best.score;
                 best_move = best.mv;
-                alpha = alpha.max(best.alpha);
                 *pv = best.pv;
                 split_ran = true;
                 if node_type == NodeType::CUT && best_score >= beta {
@@ -1193,6 +1208,7 @@ struct OrderedMoves {                     // no lifetime param any more
     next: usize,
 }
 
+#[allow(dead_code)]
 impl OrderedMoves {
     fn new(pos: &Chess, hash_move: PackedMove, killers: [Option<Move>; 2],
            history: &[[AtomicI32; 64]; 64]) -> Self {
@@ -1207,7 +1223,6 @@ impl OrderedMoves {
         Self { moves, scores, next: 0 }
     }
 
-    fn len(&self) -> usize { self.moves.len() }
 }
 
 impl Iterator for OrderedMoves {
