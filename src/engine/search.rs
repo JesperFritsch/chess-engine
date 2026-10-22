@@ -33,6 +33,10 @@ const MATE_THRESHOLD: i32 =
     + piece_value(Role::Bishop) * 2
     + piece_value(Role::Rook) * 2
     + piece_value(Role::Queen);
+// Static evaluations are capped just below the mate range. An evaluator is free
+// to return any number, and one at or above `MATE_THRESHOLD` would be taken for
+// a mate: reported as one, ending iterative deepening, shifted by ply in the TT.
+const MAX_EVAL: i32 = MATE_THRESHOLD - 1;
 
 // Score of a drawn position. Kept as a name so a contempt term (preferring a
 // slightly-worse-than-equal fight over a draw) has one place to live later.
@@ -881,7 +885,7 @@ fn quiescence<E: Evaluator>(
 ) -> Result<i32, Abort> {
     ctx.worker.nodes += 1;
     
-    let stand_pat = ctx.worker.eval.evaluate(pos, ply as usize);
+    let stand_pat = static_eval(&mut ctx.worker.eval, pos, ply);
     if stand_pat >= beta {
         return Ok(stand_pat);
     }
@@ -1328,8 +1332,13 @@ fn leaf_score<E: Evaluator>(eval: &mut E, pos: &Chess, ply: u8) -> i32 {
                 None => 0, // Draw
             }
         }
-        None => eval.evaluate(pos, ply as usize),
+        None => static_eval(eval, pos, ply),
     }
+}
+
+/// The evaluator's score, capped so it can never be mistaken for a mate.
+fn static_eval<E: Evaluator>(eval: &mut E, pos: &Chess, ply: u8) -> i32 {
+    eval.evaluate(pos, ply as usize).clamp(-MAX_EVAL, MAX_EVAL)
 }
 
 
